@@ -1,0 +1,35 @@
+# Node.js / npm
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Build output
+dist/
+build/
+.cache/
+out/
+
+# Temporary files
+*.log
+*.tmp
+*.swp
+*.DS_Store
+Thumbs.db
+
+# VSCode settings
+.vscode/
+*.code-workspace
+
+# OS
+.DS_Store
+Desktop.ini
+
+# Environment files (비밀번호, API key 등)
+.env
+.env.local
+.env.*.local
+
+# Audio / assets (대용량이면 별도 repo/LFS 추천)
+assets/audio/*
+!assets/audio/.gitkeep  # 폴더 유지용

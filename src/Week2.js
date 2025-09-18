@@ -53,21 +53,9 @@ composer.addPass(smaaPass);
 
 const aniso = 1;
 
-// BGM
-const BGM_SRC = new URL("./assets/audio/Hilighter.mp3", import.meta.url).href;
+// ==== BGM unlock (배포 안정화) ====
+const bgm = /** @type {HTMLAudioElement} */ (document.getElementById("bgm"));
 
-const bgm = new Audio();
-bgm.src = BGM_SRC;
-bgm.preload = "auto";
-bgm.loop = true;
-bgm.volume = 0.35;
-bgm.setAttribute("playsinline", "");
-document.body.appendChild(bgm);
-
-// 디버그
-bgm.addEventListener("error", () => console.warn("[bgm error]", bgm.error));
-
-// “소리 켜기” 프롬프트
 const promptBtn = document.createElement("button");
 promptBtn.textContent = "🔊 소리 켜기";
 Object.assign(promptBtn.style, {
@@ -87,55 +75,49 @@ Object.assign(promptBtn.style, {
 });
 document.body.appendChild(promptBtn);
 
-function showPrompt() {
-  promptBtn.style.display = "block";
-}
-function hidePrompt() {
-  promptBtn.style.display = "none";
-}
+const showPrompt = () => (promptBtn.style.display = "block");
+const hidePrompt = () => (promptBtn.style.display = "none");
 
-async function tryPlay(tag) {
+async function unlockAudio() {
   try {
-    await bgm.play();
-    // console.log("[bgm]", tag, "OK");
+    bgm.muted = false;
+    if (bgm.paused) await bgm.play();
     hidePrompt();
-    return true;
-  } catch (e) {
-    // console.warn("[bgm]", tag, e?.name || e);
-    return false;
+    removeUnlockers();
+  } catch {
+    showPrompt();
   }
 }
 
-// 1) muted 자동재생 트릭: 일부 브라우저에서 허용됨
-(async () => {
-  bgm.muted = true;
-  const ok = await tryPlay("autoplay-muted");
-  // 재생이 돌기 시작했으면 살짝 뒤에 언뮤트 시도
-  if (ok)
-    setTimeout(() => {
-      bgm.muted = false;
-    }, 120);
-  else showPrompt(); // 막히면 버튼 보이기
-})();
-
-// 2) 로드/탭 복귀 때 재시도
-addEventListener("load", () => tryPlay("load"));
-document.addEventListener("visibilitychange", () => {
-  if (!document.hidden) tryPlay("visible");
-});
-
-// 3) 어떤 제스처든 재시도(마우스/터치/키보드)
-function gestureStart() {
-  bgm.muted = false; // 제스처 순간에 언뮤트+재생
-  tryPlay("gesture");
-  hidePrompt();
+function addUnlockers() {
+  const opts = { once: true, passive: true };
+  addEventListener("pointerdown", unlockAudio, opts);
+  addEventListener("touchstart", unlockAudio, opts);
+  addEventListener("click", unlockAudio, opts);
+  addEventListener("keydown", unlockAudio, opts);
+  promptBtn.addEventListener("click", unlockAudio, { once: true });
 }
-["pointerdown", "click", "keydown", "touchstart"].forEach((ev) => {
-  addEventListener(ev, gestureStart, { passive: true });
-});
+function removeUnlockers() {
+  removeEventListener("pointerdown", unlockAudio);
+  removeEventListener("touchstart", unlockAudio);
+  removeEventListener("click", unlockAudio);
+  removeEventListener("keydown", unlockAudio);
+  promptBtn.removeEventListener("click", unlockAudio);
+}
 
-// 4) 프롬프트 직접 클릭
-promptBtn.addEventListener("click", gestureStart);
+addUnlockers();
+showPrompt();
+
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden && !bgm.muted && bgm.paused) {
+    bgm.play().catch(showPrompt);
+  }
+});
+window.addEventListener("pageshow", (e) => {
+  if (e.persisted && !bgm.muted && bgm.paused) {
+    bgm.play().catch(showPrompt);
+  }
+});
 
 const controls = new OrbitControls(camera, renderer.domElement);
 controls.enableDamping = true;

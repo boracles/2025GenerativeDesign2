@@ -41,6 +41,17 @@
   <body>
     <div id="hud">FPS 표시 · 단축키 안내</div>
 
+    <!-- 🔊 BGM: 자동재생은 muted로 시작, 첫 제스처 때 언뮤트 -->
+    <audio
+      id="bgm"
+      src="./assets/audio/Hilighter.mp3"
+      preload="auto"
+      loop
+      muted
+      playsinline
+      autoplay
+    ></audio>
+
     <!-- 여기서 Week2.js 로드 -->
 
     <script type="module" src="./src/Week2.js"></script>

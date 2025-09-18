@@ -53,8 +53,9 @@ composer.addPass(smaaPass);
 
 const aniso = 1;
 
-// ==== BGM unlock (배포 안정화) ====
 const bgm = /** @type {HTMLAudioElement} */ (document.getElementById("bgm"));
+// ✅ Week2.js가 /src/에 있으므로 ../assets 로 올라가야 /assets/... 에 도달
+bgm.src = new URL("../assets/audio/Hilighter.mp3", import.meta.url).href;
 
 const promptBtn = document.createElement("button");
 promptBtn.textContent = "🔊 소리 켜기";

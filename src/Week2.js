@@ -54,7 +54,7 @@ composer.addPass(smaaPass);
 const aniso = 1;
 
 // BGM
-const BGM_SRC = new URL("../assets/audio/Hilighter.mp3", document.baseURI).href;
+const BGM_SRC = new URL("./assets/audio/Hilighter.mp3", import.meta.url).href;
 
 const bgm = new Audio();
 bgm.src = BGM_SRC;

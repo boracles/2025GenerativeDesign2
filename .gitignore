@@ -29,7 +29,3 @@ Desktop.ini
 .env
 .env.local
 .env.*.local
-
-# Audio / assets (대용량이면 별도 repo/LFS 추천)
-assets/audio/*
-!assets/audio/.gitkeep  # 폴더 유지용

@@ -259,6 +259,14 @@ const fsQuad = new THREE.Mesh(
 );
 fsScene.add(fsQuad);
 
+// ─── 파일 상단 전역 ───
+let needBake = false;
+
+// 안전 큐잉 함수
+const queueBake = () => {
+  needBake = true;
+};
+
 /* GLSL Noise */
 const GLSL_NOISE = `
           float hash(vec2 p){ return fract(sin(dot(p, vec2(127.1,311.7))) * 43758.5453123); }
@@ -733,6 +741,127 @@ maskRT.texture.generateMipmaps = false;
 maskRT.texture.minFilter = THREE.LinearFilter;
 maskRT.texture.magFilter = THREE.LinearFilter;
 
+// 파일 위쪽(전역)에 한 번만
+const __ray = new THREE.Raycaster();
+const __vFrom = new THREE.Vector3();
+const __vDir = new THREE.Vector3(0, -1, 0);
+
+// === PDS: density 읽기 준비 ===
+const pdsBuf = new Uint8Array(SIM_SIZE * SIM_SIZE * 4);
+
+function sstep(edge, width, x) {
+  const e0 = edge - width;
+  const e1 = edge + width;
+  // THREE의 smoothstep은 [e0, e1]에서 0→1 이라서, 1-… 로 뒤집어줍니다.
+  return 1.0 - THREE.MathUtils.smoothstep(e0, e1, x);
+}
+
+function readMaskToDensity(species /* 'plant' | 'crab' */, scale /* 0..1 */) {
+  // maskRT 최신 내용을 CPU 버퍼로 읽음
+  renderer.readRenderTargetPixels(maskRT, 0, 0, SIM_SIZE, SIM_SIZE, pdsBuf);
+
+  function aspectMatch(a, center, width) {
+    const d = Math.min(Math.abs(a - center), 1.0 - Math.abs(a - center));
+    // center 부근일수록 1, 폭은 width
+    const t = 1.0 - THREE.MathUtils.clamp(d / (width + 1e-6), 0, 1);
+    return t * t * (3.0 - 2.0 * t); // smooth
+  }
+
+  return function densityAt(ix, iy) {
+    const idx = (iy * SIM_SIZE + ix) * 4;
+    const H = pdsBuf[idx + 0] / 255;
+    const S = pdsBuf[idx + 1] / 255;
+    const C = pdsBuf[idx + 2] / 255;
+    const A = pdsBuf[idx + 3] / 255;
+
+    const aM = aspectMatch(A, aSouth, aWidth);
+
+    if (species === "plant") {
+      const kH = 0.05,
+        kS = 0.12,
+        kC = 0.12; // 완화 폭
+      const pH = sstep(sea + hL, kH, H); // sea+hL 아래일수록 1
+      const pS = sstep(sL, kS, S); // sL 아래일수록 1
+      const pC = sstep(cL, kC, C); // cL 아래일수록 1
+      const density = THREE.MathUtils.clamp(pH * pS * pC * aM, 0, 1);
+      return scale * density;
+    } else {
+      const mid = sea + 0.5 * (hbL + hbH);
+      const sigma = Math.max(1e-3, 0.9 * (hbH - hbL));
+      const pH = Math.exp(-0.5 * Math.pow((H - mid) / sigma, 2.0)); // 0..1
+      const pS = THREE.MathUtils.clamp(
+        1.0 - Math.abs((S - (smL + smH) / 2) / ((smH - smL) / 2 + 1e-6)),
+        0,
+        1
+      );
+      const kC = 0.1;
+      const pC = 1.0 - THREE.MathUtils.smoothstep(cH - kC, cH + kC, C); // cH보다 클수록 1
+      const density = THREE.MathUtils.clamp(pH * pS * pC * aM, 0, 1);
+      return scale * density;
+    }
+  };
+}
+
+// 결과 그리기용 그룹 & 포인트 빌더
+let pdsGroup = new THREE.Group();
+scene.add(pdsGroup);
+
+function buildPoints(
+  points,
+  color /* THREE.Color */,
+  heightAt /*fn or null*/,
+  snapToMesh = true
+) {
+  const geom = new THREE.BufferGeometry();
+  const positions = new Float32Array(points.length * 3);
+
+  for (let i = 0; i < points.length; i++) {
+    const ix = points[i].x | 0;
+    const iy = points[i].y | 0;
+    const x = (ix / SIM_SIZE - 0.5) * SIZE;
+    const z = (iy / SIM_SIZE - 0.5) * SIZE;
+
+    let y;
+    if (snapToMesh) {
+      // 위에서 아래로 레이캐스트 (충분히 높은 y에서 쏘기)
+      __vFrom.set(x, 10.0, z);
+      __ray.set(__vFrom, __vDir);
+      const hit = __ray.intersectObject(terrain, true);
+      if (hit && hit.length) {
+        y = hit[0].point.y + 0.001; // 표면 살짝 띄우기
+      } else {
+        // 혹시 못 맞추면 heightRT 기반으로 폴백
+        const h = heightAt ? heightAt(ix, iy) : 0.0;
+        y = h * params.disp + 0.001;
+      }
+    } else {
+      // 기존 heightRT 기반
+      const h = heightAt ? heightAt(ix, iy) : 0.0;
+      y = h * params.disp + 0.001;
+    }
+
+    positions[i * 3 + 0] = x;
+    positions[i * 3 + 1] = y;
+    positions[i * 3 + 2] = z;
+  }
+
+  geom.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+  const mat = new THREE.PointsMaterial({
+    size: 6.0,
+    sizeAttenuation: false,
+    color,
+    depthTest: true,
+    depthWrite: false,
+    transparent: true,
+    blending: THREE.NormalBlending,
+    opacity: 1.0,
+  });
+  return new THREE.Points(geom, mat);
+}
+
+let __scatterOn = false;
+const __emPrev = { color: new THREE.Color(0x000000), intensity: 0 };
+
 const scatterRT = new THREE.WebGLRenderTarget(SIM_SIZE, SIM_SIZE, {
   format: THREE.RGBAFormat,
   type: THREE.UnsignedByteType,
@@ -776,6 +905,82 @@ const scatterMat = new THREE.ShaderMaterial({
   fragmentShader: SCATTER_FRAG_GLSL, // ← 로드한 문자열 사용
   transparent: true,
 });
+
+const sea = params.seaLevel;
+const hL = scatterMat.uniforms.tH_lo.value;
+const sL = scatterMat.uniforms.tS_lo.value;
+const cL = scatterMat.uniforms.tC_lo.value;
+const hbL = scatterMat.uniforms.tH_bandLo.value;
+const hbH = scatterMat.uniforms.tH_bandHi.value;
+const smL = scatterMat.uniforms.tS_midLo.value;
+const smH = scatterMat.uniforms.tS_midHi.value;
+const cH = scatterMat.uniforms.tC_hi.value;
+const aSouth = scatterMat.uniforms.aSouth.value;
+const aWidth = scatterMat.uniforms.aWidth.value;
+
+Object.assign(scatterMat.uniforms, {
+  uRpx: { value: 12.0 }, // 최소 간격(픽셀)
+  uSeed: { value: Math.random() * 1000.0 },
+});
+
+function applyScatterOverlay(on) {
+  if (on) {
+    // 켜기로 전환되는 '순간'에만 백업 + 적용
+    if (!__scatterOn) {
+      __emPrev.color.copy(terrainMat.emissive);
+      __emPrev.intensity = terrainMat.emissiveIntensity;
+    }
+    terrainMat.emissive.set(0xffffff);
+    terrainMat.emissiveIntensity = Math.max(terrainMat.emissiveIntensity, 3.0);
+    terrainMat.emissiveMap = scatterRT.texture;
+    __scatterOn = true;
+  } else {
+    // 끄기로 전환되는 '순간'에만 원복
+    if (__scatterOn) {
+      terrainMat.emissiveMap = null;
+      terrainMat.emissive.copy(__emPrev.color);
+      terrainMat.emissiveIntensity = __emPrev.intensity;
+
+      // 완전 소거하고 싶으면 아래 주석 해제:
+      // terrainMat.emissive.set(0x000000);
+      // terrainMat.emissiveIntensity = 0.0;
+    }
+    __scatterOn = false;
+  }
+  terrainMat.needsUpdate = true;
+}
+
+const heightBuf = new Uint16Array(SIM_SIZE * SIM_SIZE * 4);
+
+function readHeightToSampler() {
+  renderer.readRenderTargetPixels(
+    heightRT,
+    0,
+    0,
+    SIM_SIZE,
+    SIM_SIZE,
+    heightBuf
+  );
+
+  const fromHalf =
+    THREE.DataUtils && THREE.DataUtils.fromHalfFloat
+      ? THREE.DataUtils.fromHalfFloat
+      : (h) => {
+          // 폴백: half->float 디코더
+          const s = (h & 0x8000) >> 15;
+          let e = (h & 0x7c00) >> 10;
+          let f = h & 0x03ff;
+          if (e === 0) return (s ? -1 : 1) * Math.pow(2, -14) * (f / 1024);
+          if (e === 31) return f ? NaN : (s ? -1 : 1) * Infinity;
+          return (s ? -1 : 1) * Math.pow(2, e - 15) * (1 + f / 1024);
+        };
+
+  return function heightAt(ix, iy) {
+    const idx = (iy * SIM_SIZE + ix) * 4;
+    const h = fromHalf(heightBuf[idx + 0]);
+    return h;
+  };
+}
 
 // === Mask Viewer (채널별 흑백/색상화) ===
 const maskView = { channel: 1 }; // 1=Height, 2=Slope, 3=Curvature, 4=Aspect
@@ -1006,14 +1211,8 @@ function bake(dt) {
       renderer.render(fsScene, fsCam);
       renderer.setRenderTarget(null);
 
-      if (showScatter) {
-        terrainMat.emissive.set(0xffffff);
-        terrainMat.emissiveIntensity = 1.0; // 필요시 GUI로 노출
-        terrainMat.emissiveMap = scatterRT.texture; // 검정은 비발광, 점 RGB만 발광
-        terrainMat.needsUpdate = true;
-      } else {
-        terrainMat.emissiveMap = null;
-      }
+      if (showScatter) applyScatterOverlay(true);
+      else applyScatterOverlay(false);
     };
   }
 })();
@@ -1039,6 +1238,8 @@ const terrain = new THREE.Mesh(terrainGeo, terrainMat);
 terrain.castShadow = true;
 terrain.receiveShadow = true;
 scene.add(terrain);
+
+let _pdsModulePromise = null;
 
 // ───────── GUI ─────────
 // HMR/리로드 시 기존 lil-gui 패널 제거
@@ -1107,9 +1308,17 @@ gui.add(params, "crestHi", 0.005, 0.05, 0.001).name("crest hi");
 gui.add(params, "toneLow", 0.2, 1.0, 0.05).name("tone low");
 gui.add(params, "toneHigh", 1.0, 2.0, 0.05).name("tone high");
 gui.add(params, "toneGamma", 0.3, 1.5, 0.05).name("tone gamma");
-gui
-  .add(terrainMat, "emissiveIntensity", 0.0, 10.0, 0.1)
-  .name("glow (emissive)");
+
+const fBN = gui.addFolder("Scatter • Blue-Noise PDS");
+fBN.add(scatterMat.uniforms.uRpx, "value", 2.0, 32.0, 1.0).name("radius (px)");
+fBN.add(
+  {
+    Reshuffle: () => {
+      scatterMat.uniforms.uSeed.value = Math.random() * 1000.0;
+    },
+  },
+  "Reshuffle"
+);
 
 const scatterFolder = gui.addFolder("Static Scatter");
 scatterFolder
@@ -1120,6 +1329,7 @@ scatterFolder
       },
       set show(v) {
         showScatter = v;
+        applyScatterOverlay(v);
       },
     },
     "show"
@@ -1260,6 +1470,12 @@ function animate() {
 
   growthPhase = Math.min(params.bands, growthPhase + params.growSpeed * dt);
 
+  // ✨ 여기서만 한 번씩 처리
+  if (needBake) {
+    bake();
+    needBake = false;
+  }
+
   terrainMat.displacementScale = params.disp;
   terrainMat.roughness = 1.0;
   terrainMat.metalness = 0.0;
@@ -1267,15 +1483,13 @@ function animate() {
   terrainMat.normalMap.colorSpace = THREE.NoColorSpace;
   terrainMat.normalScale.set(6.0, -6.0);
 
-  let bakedHeightFrame = -999,
-    bakedNormalFrame = -999;
   if (frameCount % 3 === 0) stepRD();
-  if (frameCount % 8 === 0) bake();
+  if (frameCount % 8 === 0) needBake = true; // 주기적 베이크도 큐잉으로 변경
 
   controls.update();
   composer.render();
-
   updateFPS();
   requestAnimationFrame(animate);
 }
+
 animate();

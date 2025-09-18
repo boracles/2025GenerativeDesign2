@@ -966,9 +966,47 @@ terrain.castShadow = true;
 terrain.receiveShadow = true;
 scene.add(terrain);
 
-/* ───────── GUI ───────── */
+// ───────── GUI ─────────
+// HMR/리로드 시 기존 lil-gui 패널 제거
+document.querySelectorAll(".lil-gui").forEach((el) => el.remove());
+
 const gui = new GUI({ title: "GPU RD Terraces" });
 gui.hide();
+
+// maskMat uniforms 확장
+Object.assign(maskMat.uniforms, {
+  uHeightGamma: { value: 1.0 },
+  uHeightBias: { value: 0.0 },
+  uSlopeGain: { value: 1.0 },
+  uCurvGain: { value: 1.0 },
+  uAspectSharpen: { value: 1.0 },
+});
+
+// 리사이즈 시 texel 유지
+addEventListener("resize", () => {
+  maskMat.uniforms.texel.value.set(1 / SIM_SIZE, 1 / SIM_SIZE);
+});
+
+// 폴더/슬라이더 중복 방지
+if (!window.__MASKS_FOLDER_INIT__) {
+  const f = gui.addFolder("Masks");
+  f.add(maskMat.uniforms.uHeightGamma, "value", 0.5, 2.0, 0.05).name(
+    "Height Gamma"
+  );
+  f.add(maskMat.uniforms.uHeightBias, "value", -0.25, 0.25, 0.01).name(
+    "Height Bias"
+  );
+  f.add(maskMat.uniforms.uSlopeGain, "value", 0.25, 4.0, 0.05).name(
+    "Slope Gain"
+  );
+  f.add(maskMat.uniforms.uCurvGain, "value", 0.25, 4.0, 0.05).name("Curv Gain");
+  f.add(maskMat.uniforms.uAspectSharpen, "value", 0.5, 4.0, 0.05).name(
+    "Aspect Sharpen"
+  );
+
+  window.__MASKS_FOLDER_INIT__ = true;
+}
+
 gui.add(params, "rimWidth", 0.02, 0.2, 0.002).name("rim width");
 gui.add(params, "rimGain", 0.2, 1.2, 0.02).name("rim height");
 gui.add(params, "rimAlphaCore", 0.6, 1.5, 0.02).name("rim alpha core");
@@ -1071,7 +1109,6 @@ addEventListener("resize", () => {
 
 /* ─ Loop ─ */
 const clock = new THREE.Clock();
-// 최초 한 번 굽고 시작(노멀/컬러 비어있는 상태 방지)
 stepRD();
 bake();
 

@@ -55,10 +55,8 @@ const aniso = 1;
 
 const bgm = /** @type {HTMLAudioElement} */ (document.getElementById("bgm"));
 
-// Week2.js 위치가 /src/ 라서… 
-// - 실제 mp3가 /assets/audio/Hilighter.mp3 에 있으면:  ../assets/  (루트의 assets)
-// - 실제 mp3가 /src/assets/audio/Hilighter.mp3 에 있으면: ./assets/  (src 아래 assets)
-const bgmUrl = new URL("../assets/audio/Hilighter.mp3?v=3", import.meta.url); /
+const bgmUrl = new URL("../assets/audio/Hilighter.mp3?v=3", import.meta.url);
+bgm.src = bgmUrl.href;
 
 const promptBtn = document.createElement("button");
 promptBtn.textContent = "🔊 소리 켜기";
@@ -591,12 +589,14 @@ async function loadShader(url) {
 }
 
 // ② 외부 GLSL 로드
-const [COMMON, FRAG_HEIGHT, FRAG_NORMAL, FRAG_COLOR] = await Promise.all([
-  loadShader("./src/shaders/common.glsl"),
-  loadShader("./src/shaders/height.frag.glsl"),
-  loadShader("./src/shaders/normal.frag.glsl"),
-  loadShader("./src/shaders/color.frag.glsl"),
-]);
+const [COMMON, FRAG_HEIGHT, FRAG_NORMAL, FRAG_COLOR, MASK_FRAG] =
+  await Promise.all([
+    loadShader("./src/shaders/common.glsl"),
+    loadShader("./src/shaders/height.frag.glsl"),
+    loadShader("./src/shaders/normal.frag.glsl"),
+    loadShader("./src/shaders/color.frag.glsl"),
+    loadShader("./src/shaders/terrainMasks.frag.glsl"),
+  ]);
 
 const bakeUniforms = {
   time: { value: 0.0 },
@@ -702,6 +702,81 @@ const normalMat = new THREE.ShaderMaterial({
   vertexShader: `void main(){ gl_Position = vec4(position,1.0); }`,
   fragmentShader: FRAG_NORMAL,
 });
+
+const maskMat = new THREE.ShaderMaterial({
+  uniforms: {
+    heightTex: { value: heightRT.texture }, // heightRT_smooth 복사 후의 heightRT
+    texel: { value: new THREE.Vector2(1 / SIM_SIZE, 1 / SIM_SIZE) },
+    slopeScale: { value: 120.0 },
+    curvScale: { value: 2.0 },
+  },
+  vertexShader: `void main(){ gl_Position=vec4(position,1.0); }`,
+  fragmentShader: MASK_FRAG,
+});
+
+const maskRT = new THREE.WebGLRenderTarget(SIM_SIZE, SIM_SIZE, {
+  format: THREE.RGBAFormat,
+  type: THREE.UnsignedByteType,
+  minFilter: THREE.LinearFilter,
+  magFilter: THREE.LinearFilter,
+  depthBuffer: false,
+  stencilBuffer: false,
+});
+maskRT.texture.colorSpace = THREE.NoColorSpace;
+maskRT.texture.generateMipmaps = false;
+maskRT.texture.minFilter = THREE.LinearFilter;
+maskRT.texture.magFilter = THREE.LinearFilter;
+
+// === Mask Viewer (채널별 흑백/색상화) ===
+const maskView = { channel: 1 }; // 1=Height, 2=Slope, 3=Curvature, 4=Aspect
+const maskViewRT = new THREE.WebGLRenderTarget(SIM_SIZE, SIM_SIZE, {
+  format: THREE.RGBAFormat,
+  type: THREE.UnsignedByteType,
+  minFilter: THREE.LinearFilter,
+  magFilter: THREE.LinearFilter,
+});
+maskViewRT.texture.colorSpace = THREE.NoColorSpace;
+
+const maskViewMat = new THREE.ShaderMaterial({
+  uniforms: {
+    tMask: { value: maskRT.texture },
+    channel: { value: maskView.channel }, // 1..4
+  },
+  vertexShader: `void main(){ gl_Position=vec4(position,1.0); }`,
+  fragmentShader: /* glsl */ `
+    precision highp float;
+    uniform sampler2D tMask;
+    uniform int channel;
+    void main(){
+      vec2 uv = gl_FragCoord.xy / vec2(${SIM_SIZE}.0, ${SIM_SIZE}.0);
+      vec4 m  = texture2D(tMask, uv);
+      float v = (channel==1)? m.r : (channel==2)? m.g : (channel==3)? m.b : m.a;
+      v = (v - 0.4) * 4.0;   // offset + scale
+v = clamp(v, 0.0, 1.0);
+
+      // Aspect(4)는 색상환으로, 나머지는 흑백
+      vec3 hue;
+      if (channel==4) {
+        float h = v; // 0..1
+        float r = clamp(abs(h*6.0-3.0)-1.0, 0.0, 1.0);
+        float g = clamp(2.0-abs(h*6.0-2.0), 0.0, 1.0);
+        float b = clamp(2.0-abs(h*6.0-4.0), 0.0, 1.0);
+        hue = vec3(r,g,b);
+      } else {
+        hue = vec3(v);
+      }
+      gl_FragColor = vec4(hue, 1.0);
+    }`,
+});
+
+// maskRT → maskViewRT에 굽기
+function updateMaskViewRT() {
+  maskViewMat.uniforms.channel.value = maskView.channel | 0;
+  fsQuad.material = maskViewMat;
+  renderer.setRenderTarget(maskViewRT);
+  renderer.render(fsScene, fsCam);
+  renderer.setRenderTarget(null);
+}
 
 function blurInto(srcTex, dstRT, passes = 2) {
   let src = srcTex;
@@ -849,21 +924,24 @@ function bake(dt) {
   // color
   renderer.setRenderTarget(colorRT);
   bakeQuad.material = colorMat;
-  // 최신 노멀 바인딩 보장
-  colorMat.uniforms.normalTex.value = normalRT.texture;
 
+  colorMat.uniforms.normalTex.value = normalRT.texture;
   colorMat.uniforms.heightTexSharp.value = heightRT.texture; // 샤프(기울기/능선)
   normalMat.uniforms.heightTexBlur.value = heightBlurRT.texture;
-
   normalRT.texture.minFilter = THREE.LinearFilter;
 
   renderer.render(bakeScene, fsCam);
   colorRT.texture.anisotropy = aniso;
   colorRT.texture.needsUpdate = true;
 
+  renderer.setRenderTarget(maskRT);
+  fsQuad.material = maskMat;
+  renderer.render(fsScene, fsCam);
   renderer.setRenderTarget(null);
 
+  renderer.setRenderTarget(null);
   terrainMat.displacementMap = heightRT.texture;
+  applyBaseView();
 }
 
 /* ─ Terrain ─ */
@@ -877,7 +955,7 @@ const terrainMat = new THREE.MeshStandardMaterial({
   displacementScale: 0.0,
   roughness: 1.0,
   metalness: 0.0,
-  transparent: true,
+  transparent: false,
   alphaTest: 0.0,
   emissive: 0x0,
   emissiveIntensity: 0.0,
@@ -918,6 +996,53 @@ gui.add(params, "toneLow", 0.2, 1.0, 0.05).name("tone low");
 gui.add(params, "toneHigh", 1.0, 2.0, 0.05).name("tone high");
 gui.add(params, "toneGamma", 0.3, 1.5, 0.05).name("tone gamma");
 
+const baseView = { mode: "color" };
+
+const fBase = gui.addFolder("Base View");
+fBase
+  .add(baseView, "mode", {
+    "Color (shaded)": "color",
+    "Height (texture)": "height",
+    "Mask • Height (R)": "mask_h",
+    "Mask • Slope (G)": "mask_s",
+    "Mask • Curvature (B)": "mask_c",
+    "Mask • Aspect (A)": "mask_a",
+  })
+  .name("mode")
+  .onChange(applyBaseView);
+
+function applyBaseView() {
+  // Mask 뷰어: 채널 결정
+  if (baseView.mode.startsWith("mask_")) {
+    // 채널 매핑
+    maskView.channel =
+      baseView.mode === "mask_h"
+        ? 1
+        : baseView.mode === "mask_s"
+        ? 2
+        : baseView.mode === "mask_c"
+        ? 3
+        : 4; // mask_a
+
+    // maskRT → maskViewRT (채널 스와즐 + Aspect는 색상환)
+    updateMaskViewRT();
+
+    // 지형에 적용
+    terrainMat.map = maskViewRT.texture;
+    terrainMat.map.colorSpace = THREE.NoColorSpace;
+  } else if (baseView.mode === "color") {
+    terrainMat.map = colorRT.texture;
+    terrainMat.map.colorSpace = THREE.NoColorSpace;
+  } else {
+    // "height"
+    terrainMat.map = heightRT.texture;
+    terrainMat.map.colorSpace = THREE.NoColorSpace;
+  }
+
+  terrainMat.needsUpdate = true;
+}
+applyBaseView();
+
 addEventListener("keydown", (e) => {
   const k = (e.key || "").toLowerCase();
   if (k === "g") {
@@ -957,8 +1082,6 @@ function animate() {
   growthPhase = Math.min(params.bands, growthPhase + params.growSpeed * dt);
 
   terrainMat.displacementScale = params.disp;
-  terrainMat.map = colorRT.texture;
-  terrainMat.map.colorSpace = THREE.NoColorSpace;
   terrainMat.roughness = 1.0;
   terrainMat.metalness = 0.0;
   terrainMat.normalMap = normalRT.texture;

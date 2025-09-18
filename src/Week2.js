@@ -54,8 +54,11 @@ composer.addPass(smaaPass);
 const aniso = 1;
 
 const bgm = /** @type {HTMLAudioElement} */ (document.getElementById("bgm"));
-// ✅ Week2.js가 /src/에 있으므로 ../assets 로 올라가야 /assets/... 에 도달
-bgm.src = new URL("../assets/audio/Hilighter.mp3", import.meta.url).href;
+
+// Week2.js 위치가 /src/ 라서… 
+// - 실제 mp3가 /assets/audio/Hilighter.mp3 에 있으면:  ../assets/  (루트의 assets)
+// - 실제 mp3가 /src/assets/audio/Hilighter.mp3 에 있으면: ./assets/  (src 아래 assets)
+const bgmUrl = new URL("../assets/audio/Hilighter.mp3?v=3", import.meta.url); /
 
 const promptBtn = document.createElement("button");
 promptBtn.textContent = "🔊 소리 켜기";

@@ -900,6 +900,12 @@ const scatterMat = new THREE.ShaderMaterial({
     // 점/격자
     stride: { value: 4.0 }, // ↑ → 점수↓ 성능↑
     rDot: { value: 0.24 }, // 0..0.5 권장
+
+    uUseNoise: { value: true },
+    uNoiseScale: { value: 2.0 }, // ↑ 셀 대비 노이즈 변화를 크게
+    uNoiseAmp: { value: 0.9 }, // ↑ 효과 확실
+    uNoiseBias: { value: 0.0 },
+    uNoiseSeed: { value: Math.random() * 1000.0 },
   },
   vertexShader: `void main(){ gl_Position = vec4(position,1.0); }`,
   fragmentShader: SCATTER_FRAG_GLSL, // ← 로드한 문자열 사용
@@ -1308,6 +1314,49 @@ gui.add(params, "crestHi", 0.005, 0.05, 0.001).name("crest hi");
 gui.add(params, "toneLow", 0.2, 1.0, 0.05).name("tone low");
 gui.add(params, "toneHigh", 1.0, 2.0, 0.05).name("tone high");
 gui.add(params, "toneGamma", 0.3, 1.5, 0.05).name("tone gamma");
+
+// 앵커 [E]: GUI — Noise Filter 폴더
+const fNoise = gui.addFolder("Noise Filter");
+
+fNoise
+  .add(scatterMat.uniforms.uUseNoise, "value")
+  .name("Enable Noise")
+  .onChange(() => {
+    if (typeof queueBake === "function") queueBake();
+  });
+
+fNoise
+  .add(scatterMat.uniforms.uNoiseScale, "value", 0.05, 8.0, 0.05)
+  .name("Noise Scale")
+  .onChange(() => {
+    if (typeof queueBake === "function") queueBake();
+  });
+
+fNoise
+  .add(scatterMat.uniforms.uNoiseAmp, "value", 0.0, 2.0, 0.01)
+  .name("Noise Amp")
+  .onChange(() => {
+    if (typeof queueBake === "function") queueBake();
+  });
+
+fNoise
+  .add(scatterMat.uniforms.uNoiseBias, "value", -1.0, 1.0, 0.01)
+  .name("Noise Bias")
+  .onChange(() => {
+    if (typeof queueBake === "function") queueBake();
+  });
+
+fNoise
+  .add(
+    {
+      Reseed: () => {
+        scatterMat.uniforms.uNoiseSeed.value = Math.random() * 1000.0;
+        if (typeof queueBake === "function") queueBake();
+      },
+    },
+    "Reseed"
+  )
+  .name("▶ Reseed");
 
 const fBN = gui.addFolder("Scatter • Blue-Noise PDS");
 fBN.add(scatterMat.uniforms.uRpx, "value", 2.0, 32.0, 1.0).name("radius (px)");

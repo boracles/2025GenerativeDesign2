@@ -145,16 +145,34 @@ void main() {
   float vis = dotMask; // 기본 가시도
 
   // ---- 앵커 [C]: Noise Filtering 적용 (vis 수정) ----
+  // PATCH for scatter.frag.glsl — make Noise visibly affect dots
+// Replace ONLY the block under your [C] Noise Filtering section with this:
+
+// ---- [C] Noise Filtering 적용 (vis/size에 강하게 반영) ----
   if(uUseNoise) {
-    vec2 nUV = uv * uNoiseScale + vec2(uNoiseSeed * 0.123, uNoiseSeed * 0.789);
+  // 셀 기준 노이즈 좌표: 셀 위치가 변할 때마다 확실히 달라지도록 cell 사용
+    vec2 nUV = (cell + vec2(uNoiseSeed * 0.123, uNoiseSeed * 0.789)) * uNoiseScale;
     float n01 = fbm(nUV);           // 0..1
     float n11 = n01 * 2.0 - 1.0;    // -1..1
-    float gain = clamp(1.0 + uNoiseBias + uNoiseAmp * n11, 0.0, 2.0);
-    vis = clamp(vis * gain, 0.0, 1.0);
 
-    // (옵션: 확률적 Threshold 방식)
-    // float thresh = clamp(0.5 + 0.5*uNoiseBias + 0.5*uNoiseAmp*n11, 0.0, 1.0);
-    // vis = (vis > 0.0 && n01 > thresh) ? vis : 0.0;
+  // (1) 확률적 드롭아웃: 노이즈가 threshold보다 작으면 점 자체를 제거
+  //    → 효과가 가장 눈에 띄는 방식
+    float thresh = clamp(0.5 + 0.5 * uNoiseBias, 0.0, 1.0);   // 기준선
+    float swing = 0.5 * uNoiseAmp;                           // 가변폭
+  // n01가 (thresh - swing, thresh + swing) 주변에서 드롭/패스가 갈린다
+    if(n01 < clamp(thresh + swing * n11, 0.0, 1.0)) {
+      discard; // 점 제거
+    }
+
+  // (2) 점 크기 지터: rDot을 셀마다 흔들어 ‘자잘한 다양성’ 추가
+    float rJit = rDot * clamp(1.0 + 0.6 * uNoiseAmp * n11, 0.2, 1.8);
+    vec2 qJ = fract(p) - 0.5;
+    float dotMaskJ = step(length(qJ), rJit);
+
+  // (3) 알파 게인: 남은 점의 강도에 미세한 밝기 변화
+    float gain = clamp(1.0 + 0.6 * uNoiseBias + 0.6 * uNoiseAmp * n11, 0.0, 2.0);
+
+    vis = clamp(dotMaskJ * gain, 0.0, 1.0);
   }
 
   gl_FragColor = vec4(col, vis);

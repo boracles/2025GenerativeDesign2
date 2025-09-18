@@ -588,15 +588,21 @@ async function loadShader(url) {
   return r.text();
 }
 
-// ② 외부 GLSL 로드
-const [COMMON, FRAG_HEIGHT, FRAG_NORMAL, FRAG_COLOR, MASK_FRAG] =
-  await Promise.all([
-    loadShader("./src/shaders/common.glsl"),
-    loadShader("./src/shaders/height.frag.glsl"),
-    loadShader("./src/shaders/normal.frag.glsl"),
-    loadShader("./src/shaders/color.frag.glsl"),
-    loadShader("./src/shaders/terrainMasks.frag.glsl"),
-  ]);
+const [
+  COMMON,
+  FRAG_HEIGHT,
+  FRAG_NORMAL,
+  FRAG_COLOR,
+  MASK_FRAG,
+  SCATTER_FRAG_GLSL,
+] = await Promise.all([
+  loadShader("./src/shaders/common.glsl"),
+  loadShader("./src/shaders/height.frag.glsl"),
+  loadShader("./src/shaders/normal.frag.glsl"),
+  loadShader("./src/shaders/color.frag.glsl"),
+  loadShader("./src/shaders/terrainMasks.frag.glsl"),
+  loadShader("./src/shaders/scatter.frag.glsl"), // ← 이거 그대로 사용
+]);
 
 const bakeUniforms = {
   time: { value: 0.0 },
@@ -726,6 +732,50 @@ maskRT.texture.colorSpace = THREE.NoColorSpace;
 maskRT.texture.generateMipmaps = false;
 maskRT.texture.minFilter = THREE.LinearFilter;
 maskRT.texture.magFilter = THREE.LinearFilter;
+
+const scatterRT = new THREE.WebGLRenderTarget(SIM_SIZE, SIM_SIZE, {
+  format: THREE.RGBAFormat,
+  type: THREE.UnsignedByteType,
+  minFilter: THREE.LinearFilter,
+  magFilter: THREE.LinearFilter,
+});
+scatterRT.texture.colorSpace = THREE.NoColorSpace;
+
+// 토글 상태
+let showScatter = true;
+
+// 셰이더 재사용 로더와 동일한 스타일로 재사용 가능:
+// 여기서는 위에서 문자열로 임베드한 SCATTER_FRAG_GLSL을 곧바로 사용
+const scatterMat = new THREE.ShaderMaterial({
+  uniforms: {
+    tMask: { value: maskRT.texture },
+    texel: { value: new THREE.Vector2(1 / SIM_SIZE, 1 / SIM_SIZE) },
+    uSea: { value: params.seaLevel },
+
+    // 식물(염생식물) — 저지대·평지·오목·남향
+    tH_lo: { value: 0.005 }, // H < sea + 0.03
+    tS_lo: { value: 0.22 }, // S < 0.25
+    tC_lo: { value: 0.54 }, // C < 0.45
+
+    // 동물(소금게) — 중간 고도 밴드·약간 경사·볼록·남향
+    tH_bandLo: { value: 0 }, // sea+0.02 ≤ H
+    tH_bandHi: { value: 0.2 }, // H ≤ sea+0.12
+    tS_midLo: { value: 0.1 }, // 0.30 ≤ S
+    tS_midHi: { value: 0.9 }, // S ≤ 0.60
+    tC_hi: { value: 0.5 }, // C > 0.55
+
+    // Aspect(남향 중심/폭)
+    aSouth: { value: 0.29 }, // 남향: 0=동, 0.25=남, 0.5=서, 0.75=북
+    aWidth: { value: 0.17 }, // 허용 반폭
+
+    // 점/격자
+    stride: { value: 4.0 }, // ↑ → 점수↓ 성능↑
+    rDot: { value: 0.24 }, // 0..0.5 권장
+  },
+  vertexShader: `void main(){ gl_Position = vec4(position,1.0); }`,
+  fragmentShader: SCATTER_FRAG_GLSL, // ← 로드한 문자열 사용
+  transparent: true,
+});
 
 // === Mask Viewer (채널별 흑백/색상화) ===
 const maskView = { channel: 1 }; // 1=Height, 2=Slope, 3=Curvature, 4=Aspect
@@ -944,6 +994,30 @@ function bake(dt) {
   applyBaseView();
 }
 
+(function attachScatterAfterMaskBake() {
+  if (typeof bake === "function") {
+    const _bake = bake;
+    bake = function (...args) {
+      _bake.apply(this, args); // 기존 bake 실행
+
+      // === 여기부터 추가: maskRT → scatterRT ===
+      fsQuad.material = scatterMat;
+      renderer.setRenderTarget(scatterRT);
+      renderer.render(fsScene, fsCam);
+      renderer.setRenderTarget(null);
+
+      if (showScatter) {
+        terrainMat.emissive.set(0xffffff);
+        terrainMat.emissiveIntensity = 1.0; // 필요시 GUI로 노출
+        terrainMat.emissiveMap = scatterRT.texture; // 검정은 비발광, 점 RGB만 발광
+        terrainMat.needsUpdate = true;
+      } else {
+        terrainMat.emissiveMap = null;
+      }
+    };
+  }
+})();
+
 /* ─ Terrain ─ */
 const DIV = 512;
 const terrainGeo = new THREE.PlaneGeometry(SIZE, SIZE, DIV, DIV);
@@ -1033,6 +1107,74 @@ gui.add(params, "crestHi", 0.005, 0.05, 0.001).name("crest hi");
 gui.add(params, "toneLow", 0.2, 1.0, 0.05).name("tone low");
 gui.add(params, "toneHigh", 1.0, 2.0, 0.05).name("tone high");
 gui.add(params, "toneGamma", 0.3, 1.5, 0.05).name("tone gamma");
+gui
+  .add(terrainMat, "emissiveIntensity", 0.0, 10.0, 0.1)
+  .name("glow (emissive)");
+
+const scatterFolder = gui.addFolder("Static Scatter");
+scatterFolder
+  .add(
+    {
+      get show() {
+        return showScatter;
+      },
+      set show(v) {
+        showScatter = v;
+      },
+    },
+    "show"
+  )
+  .name("Show Scatter");
+
+// Plant
+scatterFolder
+  .add(scatterMat.uniforms.tH_lo, "value", 0.0, 0.08, 0.005)
+  .name("Plant H_lo");
+scatterFolder
+  .add(scatterMat.uniforms.tS_lo, "value", 0.05, 0.5, 0.01)
+  .name("Plant S_lo");
+scatterFolder
+  .add(scatterMat.uniforms.tC_lo, "value", 0.3, 0.6, 0.01)
+  .name("Plant C_lo");
+
+// Crab
+scatterFolder
+  .add(scatterMat.uniforms.tH_bandLo, "value", 0.0, 0.1, 0.005)
+  .name("Crab H_bandLo");
+scatterFolder
+  .add(scatterMat.uniforms.tH_bandHi, "value", 0.06, 0.2, 0.005)
+  .name("Crab H_bandHi");
+scatterFolder
+  .add(scatterMat.uniforms.tS_midLo, "value", 0.1, 0.5, 0.01)
+  .name("Crab S_midLo");
+scatterFolder
+  .add(scatterMat.uniforms.tS_midHi, "value", 0.4, 0.9, 0.01)
+  .name("Crab S_midHi");
+scatterFolder
+  .add(scatterMat.uniforms.tC_hi, "value", 0.5, 0.7, 0.01)
+  .name("Crab C_hi");
+
+// Aspect
+scatterFolder
+  .add(scatterMat.uniforms.aSouth, "value", 0.0, 1.0, 0.01)
+  .name("Aspect South");
+scatterFolder
+  .add(scatterMat.uniforms.aWidth, "value", 0.05, 0.3, 0.01)
+  .name("Aspect Width");
+
+// Dots
+scatterFolder
+  .add(scatterMat.uniforms.stride, "value", 3.0, 16.0, 1.0)
+  .name("Stride (px)");
+scatterFolder
+  .add(scatterMat.uniforms.rDot, "value", 0.2, 0.6, 0.02)
+  .name("Dot Radius");
+
+// 리사이즈 보정(텍셀/RT)
+addEventListener("resize", () => {
+  scatterMat.uniforms.texel.value.set(1 / SIM_SIZE, 1 / SIM_SIZE);
+  scatterRT.setSize(SIM_SIZE, SIM_SIZE);
+});
 
 const baseView = { mode: "color" };
 

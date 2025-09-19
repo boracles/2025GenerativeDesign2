@@ -933,18 +933,19 @@ const caRT_B = caRT_A.clone();
 const caMat = new THREE.ShaderMaterial({
   uniforms: {
     uCAEnable: { value: false },
-    uCABirthMask: { value: 8 }, // B3
-    uCASurviveMask: { value: 12 }, // S23
+    uCABirthMask: { value: 4 }, // B3
+    uCASurviveMask: { value: 6 }, // S23
     uCANeigh: { value: 0 }, // 0=Moore, 1=vonNeumann
-    uCAIterations: { value: 2 },
-    uCAThreshold: { value: 0.5 },
-    uCAJitter: { value: 0.0 },
+    uCAIterations: { value: 8 },
+    uCAThreshold: { value: 0.2 },
+    uCAJitter: { value: 0.1 },
     uCASeed: { value: Math.random() * 1000.0 },
     uTexel: { value: new THREE.Vector2(1 / SIM_SIZE, 1 / SIM_SIZE) },
     uSource: { value: null },
     uPrev: { value: null },
     uCAStateChan: { value: 1 }, // 0=alpha, 1=luma(기본)
     uUseLumaForPrev: { value: true },
+    uCAInvert: { value: false },
   },
   vertexShader: `void main(){ gl_Position = vec4(position,1.0); }`,
   fragmentShader: CA_FRAG_GLSL, // ← Promise.all에서 읽어온 문자열 사용
@@ -972,7 +973,6 @@ caMat.uniforms.uCAThreshold.value = CA_DEFAULTS.threshold;
 caMat.uniforms.uCAJitter.value = CA_DEFAULTS.jitter;
 
 function runScatterAndCA() {
-  // 1) scatter 갱신 (항상 최신으로)
   fsQuad.material = scatterMat;
   renderer.setRenderTarget(scatterRT);
   renderer.render(fsScene, fsCam);
@@ -982,65 +982,51 @@ function runScatterAndCA() {
   const texel = 1 / SIM_SIZE;
 
   if (!enabled) {
-    // OFF → 누적 해제
     caAccumTex = null;
     terrainMat.emissiveMap = scatterRT.texture;
     terrainMat.emissive.set(0xffffff);
-    terrainMat.emissiveIntensity = Math.max(terrainMat.emissiveIntensity, 3.0);
-
-    if (typeof applyScatterOverlay === "function") {
-      if (showScatter) applyScatterOverlay(true);
-      else applyScatterOverlay(false);
-    }
-    terrainMat.needsUpdate = true;
+    terrainMat.emissiveIntensity = 3.0;
     caWasEnabled = false;
     return;
   }
 
-  // ON
+  // CA 초기화는 딱 한 번만
+  if (!caWasEnabled) {
+    caAccumTex = scatterRT.texture;
+
+    caMat.uniforms.uUseLumaForPrev.value =
+      caMat.uniforms.uCAStateChan.value === 1;
+
+    caWasEnabled = true;
+  } else {
+    caMat.uniforms.uUseLumaForPrev.value = false;
+  }
+
   caMat.uniforms.uTexel.value.set(texel, texel);
   caMat.uniforms.uSource.value = scatterRT.texture;
-
-  // 첫 프레임 ON: scatter에서 시작
-  if (!caWasEnabled || !caAccumTex) {
-    caAccumTex = scatterRT.texture;
-    caMat.uniforms.uUseLumaForPrev.value = true; // ★ 초기화는 루마
-  } else {
-    caMat.uniforms.uUseLumaForPrev.value = false; // ★ 이후는 알파(누적)
-  }
-  // --- 누적 입력 = 직전 프레임 결과 ---
   caMat.uniforms.uPrev.value = caAccumTex;
 
   const maxI = Math.min(caMat.uniforms.uCAIterations.value | 0, 16);
+  caMat.uniforms.uCAIterations.value = maxI;
+
   let ping = true;
   for (let i = 0; i < maxI; i++) {
-    caMat.uniforms.uCAIterations.value = i + 1;
     fsQuad.material = caMat;
     renderer.setRenderTarget(ping ? caRT_A : caRT_B);
     renderer.render(fsScene, fsCam);
     renderer.setRenderTarget(null);
 
-    // 다음 스텝의 입력으로 방금 결과 연결
     caMat.uniforms.uPrev.value = (ping ? caRT_A : caRT_B).texture;
     ping = !ping;
   }
 
-  // 이번 프레임 최종 출력
   const outTex = (!ping ? caRT_A : caRT_B).texture;
-
-  // 다음 프레임의 입력으로 "축적"
   caAccumTex = outTex;
 
-  // 시각화
   terrainMat.emissiveMap = outTex;
   terrainMat.emissive.set(0xffffff);
-  terrainMat.emissiveIntensity = Math.max(terrainMat.emissiveIntensity, 3.0);
-
-  // overlay가 덮지 않게 OFF 유지
-  if (typeof applyScatterOverlay === "function") applyScatterOverlay(false);
-
+  terrainMat.emissiveIntensity = 3.0;
   terrainMat.needsUpdate = true;
-  caWasEnabled = true;
 }
 
 const sea = params.seaLevel;
@@ -1139,6 +1125,7 @@ const maskViewMat = new THREE.ShaderMaterial({
     precision highp float;
     uniform sampler2D tMask;
     uniform int channel;
+
     void main(){
       vec2 uv = gl_FragCoord.xy / vec2(${SIM_SIZE}.0, ${SIM_SIZE}.0);
       vec4 m  = texture2D(tMask, uv);
@@ -1157,8 +1144,8 @@ v = clamp(v, 0.0, 1.0);
       } else {
         hue = vec3(v);
       }
-      gl_FragColor = vec4(hue, 1.0);
-    }`,
+    }
+    `,
 });
 
 // maskRT → maskViewRT에 굽기
@@ -1476,6 +1463,11 @@ fCA
   .add(caMat.uniforms.uCAStateChan, "value", { Alpha: 0, Luma: 1 })
   .name("State From")
   .onChange(runScatterAndCA);
+
+fCA
+  .add(caMat.uniforms.uCAInvert, "value")
+  .name("Invert Seed")
+  .onChange(markInit);
 
 fCA.add(
   {

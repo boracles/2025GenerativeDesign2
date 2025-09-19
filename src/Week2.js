@@ -603,13 +603,15 @@ const [
   FRAG_COLOR,
   MASK_FRAG,
   SCATTER_FRAG_GLSL,
+  CA_FRAG_GLSL, // ← 추가
 ] = await Promise.all([
   loadShader("./src/shaders/common.glsl"),
   loadShader("./src/shaders/height.frag.glsl"),
   loadShader("./src/shaders/normal.frag.glsl"),
   loadShader("./src/shaders/color.frag.glsl"),
   loadShader("./src/shaders/terrainMasks.frag.glsl"),
-  loadShader("./src/shaders/scatter.frag.glsl"), // ← 이거 그대로 사용
+  loadShader("./src/shaders/scatter.frag.glsl"),
+  loadShader("./src/shaders/ca.frag.glsl"), // ← 추가
 ]);
 
 const bakeUniforms = {
@@ -860,6 +862,9 @@ function buildPoints(
 }
 
 let __scatterOn = false;
+let caAccumTex = null; // 현재 프레임에 쓸 입력(이전 CA 결과)
+let caWasEnabled = false; // 직전 프레임의 on/off 기억
+
 const __emPrev = { color: new THREE.Color(0x000000), intensity: 0 };
 
 const scatterRT = new THREE.WebGLRenderTarget(SIM_SIZE, SIM_SIZE, {
@@ -870,8 +875,7 @@ const scatterRT = new THREE.WebGLRenderTarget(SIM_SIZE, SIM_SIZE, {
 });
 scatterRT.texture.colorSpace = THREE.NoColorSpace;
 
-// 토글 상태
-let showScatter = true;
+let showScatter = false;
 
 // 셰이더 재사용 로더와 동일한 스타일로 재사용 가능:
 // 여기서는 위에서 문자열로 임베드한 SCATTER_FRAG_GLSL을 곧바로 사용
@@ -911,6 +915,130 @@ const scatterMat = new THREE.ShaderMaterial({
   fragmentShader: SCATTER_FRAG_GLSL, // ← 로드한 문자열 사용
   transparent: true,
 });
+
+const caRT_A = new THREE.WebGLRenderTarget(SIM_SIZE, SIM_SIZE, {
+  format: THREE.RGBAFormat,
+  type: THREE.UnsignedByteType,
+  minFilter: THREE.LinearFilter,
+  magFilter: THREE.LinearFilter,
+  wrapS: THREE.ClampToEdgeWrapping,
+  wrapT: THREE.ClampToEdgeWrapping,
+  depthBuffer: false,
+  stencilBuffer: false,
+  generateMipmaps: false,
+});
+caRT_A.texture.colorSpace = THREE.NoColorSpace;
+const caRT_B = caRT_A.clone();
+
+const caMat = new THREE.ShaderMaterial({
+  uniforms: {
+    uCAEnable: { value: false },
+    uCABirthMask: { value: 8 }, // B3
+    uCASurviveMask: { value: 12 }, // S23
+    uCANeigh: { value: 0 }, // 0=Moore, 1=vonNeumann
+    uCAIterations: { value: 2 },
+    uCAThreshold: { value: 0.5 },
+    uCAJitter: { value: 0.0 },
+    uCASeed: { value: Math.random() * 1000.0 },
+    uTexel: { value: new THREE.Vector2(1 / SIM_SIZE, 1 / SIM_SIZE) },
+    uSource: { value: null },
+    uPrev: { value: null },
+    uCAStateChan: { value: 1 }, // 0=alpha, 1=luma(기본)
+  },
+  vertexShader: `void main(){ gl_Position = vec4(position,1.0); }`,
+  fragmentShader: CA_FRAG_GLSL, // ← Promise.all에서 읽어온 문자열 사용
+  transparent: true,
+});
+
+const CA_DEFAULTS = {
+  enable: false,
+  birthMask: 8, // 예 B3 → 8
+  surviveMask: 12, // 예 S23 → 12
+  neigh: 0,
+  iterations: 2,
+  threshold: 0.5,
+  jitter: 0.0,
+  reseed: () => (caMat.uniforms.uCASeed.value = Math.random() * 1000.0),
+};
+
+// 초기 반영(선택)
+caMat.uniforms.uCAEnable.value = CA_DEFAULTS.enable;
+caMat.uniforms.uCABirthMask.value = CA_DEFAULTS.birthMask;
+caMat.uniforms.uCASurviveMask.value = CA_DEFAULTS.surviveMask;
+caMat.uniforms.uCANeigh.value = CA_DEFAULTS.neigh;
+caMat.uniforms.uCAIterations.value = CA_DEFAULTS.iterations;
+caMat.uniforms.uCAThreshold.value = CA_DEFAULTS.threshold;
+caMat.uniforms.uCAJitter.value = CA_DEFAULTS.jitter;
+
+function runScatterAndCA() {
+  // 1) scatter 갱신 (항상 최신으로)
+  fsQuad.material = scatterMat;
+  renderer.setRenderTarget(scatterRT);
+  renderer.render(fsScene, fsCam);
+  renderer.setRenderTarget(null);
+
+  const enabled = !!caMat.uniforms.uCAEnable.value;
+  const texel = 1 / SIM_SIZE;
+
+  if (!enabled) {
+    // OFF → 누적 해제
+    caAccumTex = null;
+    terrainMat.emissiveMap = scatterRT.texture;
+    terrainMat.emissive.set(0xffffff);
+    terrainMat.emissiveIntensity = Math.max(terrainMat.emissiveIntensity, 3.0);
+
+    if (typeof applyScatterOverlay === "function") {
+      if (showScatter) applyScatterOverlay(true);
+      else applyScatterOverlay(false);
+    }
+    terrainMat.needsUpdate = true;
+    caWasEnabled = false;
+    return;
+  }
+
+  // ON
+  caMat.uniforms.uTexel.value.set(texel, texel);
+  caMat.uniforms.uSource.value = scatterRT.texture;
+
+  // 첫 프레임 ON: 입력을 scatter에서 시작
+  if (!caWasEnabled || !caAccumTex) {
+    caAccumTex = scatterRT.texture;
+  }
+
+  // --- 누적 입력 = 직전 프레임 결과 ---
+  caMat.uniforms.uPrev.value = caAccumTex;
+
+  const maxI = Math.min(caMat.uniforms.uCAIterations.value | 0, 16);
+  let ping = true;
+  for (let i = 0; i < maxI; i++) {
+    caMat.uniforms.uCAIterations.value = i + 1;
+    fsQuad.material = caMat;
+    renderer.setRenderTarget(ping ? caRT_A : caRT_B);
+    renderer.render(fsScene, fsCam);
+    renderer.setRenderTarget(null);
+
+    // 다음 스텝의 입력으로 방금 결과 연결
+    caMat.uniforms.uPrev.value = (ping ? caRT_A : caRT_B).texture;
+    ping = !ping;
+  }
+
+  // 이번 프레임 최종 출력
+  const outTex = (!ping ? caRT_A : caRT_B).texture;
+
+  // 다음 프레임의 입력으로 "축적"
+  caAccumTex = outTex;
+
+  // 시각화
+  terrainMat.emissiveMap = outTex;
+  terrainMat.emissive.set(0xffffff);
+  terrainMat.emissiveIntensity = Math.max(terrainMat.emissiveIntensity, 3.0);
+
+  // overlay가 덮지 않게 OFF 유지
+  if (typeof applyScatterOverlay === "function") applyScatterOverlay(false);
+
+  terrainMat.needsUpdate = true;
+  caWasEnabled = true;
+}
 
 const sea = params.seaLevel;
 const hL = scatterMat.uniforms.tH_lo.value;
@@ -1205,24 +1333,6 @@ function bake(dt) {
   applyBaseView();
 }
 
-(function attachScatterAfterMaskBake() {
-  if (typeof bake === "function") {
-    const _bake = bake;
-    bake = function (...args) {
-      _bake.apply(this, args); // 기존 bake 실행
-
-      // === 여기부터 추가: maskRT → scatterRT ===
-      fsQuad.material = scatterMat;
-      renderer.setRenderTarget(scatterRT);
-      renderer.render(fsScene, fsCam);
-      renderer.setRenderTarget(null);
-
-      if (showScatter) applyScatterOverlay(true);
-      else applyScatterOverlay(false);
-    };
-  }
-})();
-
 /* ─ Terrain ─ */
 const DIV = 512;
 const terrainGeo = new THREE.PlaneGeometry(SIZE, SIZE, DIV, DIV);
@@ -1314,6 +1424,49 @@ gui.add(params, "crestHi", 0.005, 0.05, 0.001).name("crest hi");
 gui.add(params, "toneLow", 0.2, 1.0, 0.05).name("tone low");
 gui.add(params, "toneHigh", 1.0, 2.0, 0.05).name("tone high");
 gui.add(params, "toneGamma", 0.3, 1.5, 0.05).name("tone gamma");
+
+const fCA = gui.addFolder("Cellular Automata");
+fCA
+  .add(caMat.uniforms.uCAEnable, "value")
+  .name("Enable CA")
+  .onChange(runScatterAndCA);
+fCA
+  .add(caMat.uniforms.uCABirthMask, "value", 0, 255, 1)
+  .name("Birth Mask")
+  .onChange(runScatterAndCA);
+fCA
+  .add(caMat.uniforms.uCASurviveMask, "value", 0, 255, 1)
+  .name("Survive Mask")
+  .onChange(runScatterAndCA);
+fCA
+  .add(caMat.uniforms.uCANeigh, "value", { Moore: 0, vonNeumann: 1 })
+  .name("Neighborhood")
+  .onChange(runScatterAndCA);
+fCA
+  .add(caMat.uniforms.uCAIterations, "value", 0, 16, 1)
+  .name("Iterations")
+  .onChange(runScatterAndCA);
+fCA
+  .add(caMat.uniforms.uCAThreshold, "value", 0.0, 1.0, 0.01)
+  .name("Threshold")
+  .onChange(runScatterAndCA);
+fCA
+  .add(caMat.uniforms.uCAJitter, "value", 0.0, 1.0, 0.01)
+  .name("Jitter")
+  .onChange(runScatterAndCA);
+fCA
+  .add(caMat.uniforms.uCAStateChan, "value", { Alpha: 0, Luma: 1 })
+  .name("State From")
+  .onChange(runScatterAndCA);
+fCA.add(
+  {
+    Reseed: () => {
+      caMat.uniforms.uCASeed.value = Math.random() * 1000;
+      runScatterAndCA();
+    },
+  },
+  "Reseed"
+);
 
 // 앵커 [E]: GUI — Noise Filter 폴더
 const fNoise = gui.addFolder("Noise Filter");
@@ -1536,6 +1689,7 @@ function animate() {
   if (frameCount % 8 === 0) needBake = true; // 주기적 베이크도 큐잉으로 변경
 
   controls.update();
+  runScatterAndCA();
   composer.render();
   updateFPS();
   requestAnimationFrame(animate);

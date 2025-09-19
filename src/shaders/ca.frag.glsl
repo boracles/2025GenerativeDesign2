@@ -20,6 +20,7 @@ uniform int uCAStateChan;
 
 uniform sampler2D uSource;
 uniform sampler2D uPrev;
+uniform bool uUseLumaForPrev;
 
 float hash21(vec2 p) {
   p = fract(p * vec2(443.8975, 441.423));
@@ -30,20 +31,16 @@ float luma(vec3 c) {
   return dot(c, vec3(0.299, 0.587, 0.114));
 }
 
-int state01(sampler2D tex, vec2 uv, float th) {
-  vec4 t = texture2D(tex, uv);
-  float v;
-  if(uCAStateChan == 1 && uCAIterations == 1) {
-    // 첫 스텝에서만 루마 사용 (초기 scatter → 상태화)
-    v = luma(t.rgb);
-  } else {
-    // 이후 스텝은 항상 알파(=CA 상태) 사용
-    v = t.a;
-  }
-  return (v >= th) ? 1 : 0;
+float readPrev01(vec2 uv, float th) {
+  vec4 t = texture2D(uPrev, uv);
+  float v = uUseLumaForPrev ? dot(t.rgb, vec3(0.299, 0.587, 0.114))   // 첫 프레임: 루마
+  : t.a;                                     // 이후: 알파
+  // 소프트 임계 (너무 빡세면 다 죽는 것 방지)
+  float p = smoothstep(th - 0.05, th + 0.05, v);
+  return (p > 0.5) ? 1.0 : 0.0;
 }
 
-int neighSum(sampler2D tex, vec2 uv, int mode, float th, vec2 texel) {
+int neighSumLattice(vec2 uv, int mode, float th, vec2 texel) {
   int s = 0;
   if(mode == 0) {
     vec2 o[8];
@@ -55,14 +52,14 @@ int neighSum(sampler2D tex, vec2 uv, int mode, float th, vec2 texel) {
     o[5] = vec2(-texel.x, texel.y);
     o[6] = vec2(0.0, texel.y);
     o[7] = vec2(texel.x, texel.y);
-    for(int i = 0; i < 8; i++) s += state01(tex, uv + o[i], th);
+    for(int i = 0; i < 8; i++) s += int(readPrev01(uv + o[i], th));
   } else {
     vec2 o4[4];
     o4[0] = vec2(0.0, -texel.y);
     o4[1] = vec2(-texel.x, 0.0);
     o4[2] = vec2(texel.x, 0.0);
     o4[3] = vec2(0.0, texel.y);
-    for(int i = 0; i < 4; i++) s += state01(tex, uv + o4[i], th);
+    for(int i = 0; i < 4; i++) s += int(readPrev01(uv + o4[i], th));
   }
   return s;
 }
@@ -80,8 +77,8 @@ void main() {
   vec2 uv = gl_FragCoord.xy * uTexel;
   vec3 srcRGB = texture2D(uSource, uv).rgb;
 
-  int s0 = state01(uPrev, uv, uCAThreshold);
-  int n = neighSum(uPrev, uv, uCANeigh, uCAThreshold, uTexel);
+  int s0 = int(readPrev01(uv, uCAThreshold));
+  int n = neighSumLattice(uv, uCANeigh, uCAThreshold, uTexel);
   int b = bitOn(uCABirthMask, n);
   int sv = bitOn(uCASurviveMask, n);
 

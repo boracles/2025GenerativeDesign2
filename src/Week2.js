@@ -944,6 +944,7 @@ const caMat = new THREE.ShaderMaterial({
     uSource: { value: null },
     uPrev: { value: null },
     uCAStateChan: { value: 1 }, // 0=alpha, 1=luma(기본)
+    uUseLumaForPrev: { value: true },
   },
   vertexShader: `void main(){ gl_Position = vec4(position,1.0); }`,
   fragmentShader: CA_FRAG_GLSL, // ← Promise.all에서 읽어온 문자열 사용
@@ -1000,11 +1001,13 @@ function runScatterAndCA() {
   caMat.uniforms.uTexel.value.set(texel, texel);
   caMat.uniforms.uSource.value = scatterRT.texture;
 
-  // 첫 프레임 ON: 입력을 scatter에서 시작
+  // 첫 프레임 ON: scatter에서 시작
   if (!caWasEnabled || !caAccumTex) {
     caAccumTex = scatterRT.texture;
+    caMat.uniforms.uUseLumaForPrev.value = true; // ★ 초기화는 루마
+  } else {
+    caMat.uniforms.uUseLumaForPrev.value = false; // ★ 이후는 알파(누적)
   }
-
   // --- 누적 입력 = 직전 프레임 결과 ---
   caMat.uniforms.uPrev.value = caAccumTex;
 
@@ -1426,43 +1429,59 @@ gui.add(params, "toneHigh", 1.0, 2.0, 0.05).name("tone high");
 gui.add(params, "toneGamma", 0.3, 1.5, 0.05).name("tone gamma");
 
 const fCA = gui.addFolder("Cellular Automata");
+
+// Neighborhood / Threshold / Reseed 바꿀 때 초기화 한 프레임 루마
+const markInit = () => {
+  caAccumTex = null;
+  caWasEnabled = false;
+  runScatterAndCA();
+};
+
 fCA
   .add(caMat.uniforms.uCAEnable, "value")
   .name("Enable CA")
   .onChange(runScatterAndCA);
+
 fCA
   .add(caMat.uniforms.uCABirthMask, "value", 0, 255, 1)
   .name("Birth Mask")
   .onChange(runScatterAndCA);
+
 fCA
   .add(caMat.uniforms.uCASurviveMask, "value", 0, 255, 1)
   .name("Survive Mask")
   .onChange(runScatterAndCA);
+
 fCA
   .add(caMat.uniforms.uCANeigh, "value", { Moore: 0, vonNeumann: 1 })
   .name("Neighborhood")
-  .onChange(runScatterAndCA);
+  .onChange(markInit);
+
 fCA
   .add(caMat.uniforms.uCAIterations, "value", 0, 16, 1)
   .name("Iterations")
   .onChange(runScatterAndCA);
+
 fCA
   .add(caMat.uniforms.uCAThreshold, "value", 0.0, 1.0, 0.01)
   .name("Threshold")
-  .onChange(runScatterAndCA);
+  .onChange(markInit);
+
 fCA
   .add(caMat.uniforms.uCAJitter, "value", 0.0, 1.0, 0.01)
   .name("Jitter")
   .onChange(runScatterAndCA);
+
 fCA
   .add(caMat.uniforms.uCAStateChan, "value", { Alpha: 0, Luma: 1 })
   .name("State From")
   .onChange(runScatterAndCA);
+
 fCA.add(
   {
     Reseed: () => {
       caMat.uniforms.uCASeed.value = Math.random() * 1000;
-      runScatterAndCA();
+      markInit();
     },
   },
   "Reseed"

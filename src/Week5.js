@@ -70,7 +70,7 @@ const initMat = new THREE.RawShaderMaterial({
   vertexShader: vertSrc,
   fragmentShader: initSrc,
   uniforms: {
-    uThreshold: { value: 0.99611 },
+    uThreshold: { value: 0.99613 },
     uTime: { value: 0 },
   },
 });

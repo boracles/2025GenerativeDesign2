@@ -53,8 +53,9 @@ void main() {
         float r = periodicNoise(cell + vec2(0.37, 0.61));
         // 거리 페이드(부드러운 원): 중심에서 멀어질수록 약해짐
         float falloff = 1.0 - float(s) / float(max(steps, 1));
+        float sizeBoost = (r < uAccentRatio) ? 1.5 : 1.0; // 와인색 30% 더 넓게
         if(r < uAccentRatio)
-          redA = max(redA, v * falloff);
+          redA = max(redA, v * falloff * sizeBoost);
         else
           whiteA = max(whiteA, v * falloff);
       }

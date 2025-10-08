@@ -45,7 +45,10 @@ const sceneDisplay = new THREE.Scene();
 const quad = new THREE.BufferGeometry();
 quad.setAttribute(
   "position",
-  new THREE.BufferAttribute(new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]), 2)
+  new THREE.BufferAttribute(
+    new Float32Array([-1, -1, 0, 1, -1, 0, -1, 1, 0, 1, 1, 0]),
+    3 // ← vec3!
+  )
 );
 quad.setIndex([0, 1, 2, 2, 1, 3]);
 

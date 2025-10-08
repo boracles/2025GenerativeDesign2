@@ -1,13 +1,16 @@
+// rd_display.frag.glsl  (청록 팔레트)
 precision highp float;
 in vec2 vUv;
 out vec4 outColor;
-uniform sampler2D uState;  // RG=U,V
+
+uniform sampler2D uState; // RG=U,V
+
+const vec3 TEAL_LIGHT = vec3(1.0, 1.0, 1.0); // 흰색
+const vec3 TEAL_DARK = vec3(11.0 / 255.0, 104.0 / 255.0, 133.0 / 255.0); // #0B6885
 
 void main() {
   vec2 uv = texture(uState, vUv).rg; // U,V
-  float U = uv.r;
   float V = uv.g;
-  // V가 있는 곳을 밝게 보여줌 (시드 점 확인용)
-  float c = mix(0.12, 1.0, V);
-  outColor = vec4(vec3(c), 1.0);
+  vec3 col = mix(TEAL_DARK, TEAL_LIGHT, smoothstep(0.0, 1.0, V));
+  outColor = vec4(col, 1.0);
 }

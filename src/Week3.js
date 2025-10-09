@@ -46,8 +46,8 @@ function toPOTTexture(srcImage, size = 1024) {
   ctx.drawImage(srcImage, 0, 0, size, size);
 
   const tex = new THREE.CanvasTexture(c);
-  tex.colorSpace = THREE.NoColorSpace; // 알파 손상 방지
-  tex.premultiplyAlpha = true; // 프린지 방지
+  tex.colorSpace = THREE.SRGBColorSpace;
+  tex.premultiplyAlpha = false;
   tex.wrapS = tex.wrapT = THREE.RepeatWrapping; // 이제 Repeat OK
   tex.generateMipmaps = true; // mipmap 활성화
   tex.minFilter = THREE.LinearMipmapLinearFilter;
@@ -66,8 +66,8 @@ texLoader.load("./assets/textures/RD.png", (tex) => {
   rdMat = new THREE.MeshStandardMaterial({
     map: rdPOT,
     metalness: 0.0,
-    roughness: 0.6,
-    side: THREE.FrontSide,
+    roughness: 1.0,
+    side: THREE.DoubleSideide,
     transparent: true,
     alphaTest: 0.5,
     depthWrite: true,

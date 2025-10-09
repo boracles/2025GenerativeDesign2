@@ -117,7 +117,10 @@ function applyRDToNamedMeshes(root) {
   const hits = [];
   root.traverse((o) => {
     if (!o.isMesh) return;
-    if (/^(body(\.\d+)?|ball(\.\d+)?)$/i.test(o.name)) {
+    if (
+      /body(\.\d+)?/i.test(o.name) ||
+      /leg[_\s-]?ball(\.\d+)?/i.test(o.name)
+    ) {
       o.material = rdMat;
       o.castShadow = o.receiveShadow = true;
       console.log("RD applied →", o.name);

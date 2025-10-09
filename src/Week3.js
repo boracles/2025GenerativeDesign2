@@ -67,7 +67,7 @@ texLoader.load("./assets/textures/RD.png", (tex) => {
     map: rdPOT,
     metalness: 0.0,
     roughness: 1.0,
-    side: THREE.DoubleSideide,
+    side: THREE.DoubleSide,
     transparent: true,
     alphaTest: 0.5,
     depthWrite: true,

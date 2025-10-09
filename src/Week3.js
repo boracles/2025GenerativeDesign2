@@ -33,58 +33,73 @@ dirLight.position.set(5, 10, 7);
 dirLight.castShadow = true;
 scene.add(dirLight);
 
-// 🔻 GLB 로딩 준비
+// ------------------------------------------------------------------
+// 전역 변수
+let rdMat = null;
+let modelLoaded = null;
+
+function toPOTTexture(srcImage, size = 1024) {
+  const c = document.createElement("canvas");
+  c.width = size;
+  c.height = size;
+  const ctx = c.getContext("2d");
+  ctx.drawImage(srcImage, 0, 0, size, size);
+
+  const tex = new THREE.CanvasTexture(c);
+  tex.colorSpace = THREE.NoColorSpace; // 알파 손상 방지
+  tex.premultiplyAlpha = true; // 프린지 방지
+  tex.wrapS = tex.wrapT = THREE.RepeatWrapping; // 이제 Repeat OK
+  tex.generateMipmaps = true; // mipmap 활성화
+  tex.minFilter = THREE.LinearMipmapLinearFilter;
+  tex.magFilter = THREE.LinearFilter;
+  tex.anisotropy = Math.min(8, renderer.capabilities.getMaxAnisotropy());
+  tex.needsUpdate = true;
+  return tex;
+}
+
+// 텍스처 로드
+const texLoader = new THREE.TextureLoader();
+texLoader.load("./assets/textures/RD.png", (tex) => {
+  // RD.png → 1024x1024로 리샘플
+  const rdPOT = toPOTTexture(tex.image, 1024);
+
+  rdMat = new THREE.MeshStandardMaterial({
+    map: rdPOT,
+    metalness: 0.0,
+    roughness: 0.6,
+    side: THREE.FrontSide,
+    transparent: true,
+    alphaTest: 0.5,
+    depthWrite: true,
+  });
+
+  // 원하는 타일 수로 (깨짐 없이)
+  rdMat.map.repeat.set(8, 8); // ← 타일링 크게
+  rdMat.map.needsUpdate = true;
+
+  if (modelLoaded) applyRDToNamedMeshes(modelLoaded);
+});
+
+// ------------------------------------------------------------------
+// GLB 로드
 const loader = new GLTFLoader();
-let mixer; // 애니메이션용
+let mixer;
 const clock = new THREE.Clock();
 
-// 🔻 GLB 로드 (여기 안에서만 model 사용)
 loader.load(
   "./assets/models/Tentacles.glb",
   (gltf) => {
-    const model = gltf.scene;
-    scene.add(model);
+    modelLoaded = gltf.scene;
+    scene.add(modelLoaded);
 
-    // 몸통 찾기
-    let body = null;
-    model.traverse((o) => {
-      if (o.isMesh) {
-        o.castShadow = o.receiveShadow = true;
-        if (/body|halophile/i.test(o.name)) body = o;
-
-        // 머티리얼 보정
-        const fix = (m) => {
-          if (!m) return;
-          if (m.map) m.map.colorSpace = THREE.SRGBColorSpace;
-          if (m.emissiveMap) m.emissiveMap.colorSpace = THREE.SRGBColorSpace;
-          m.transparent = false;
-          m.opacity = 1;
-          m.alphaTest = 0;
-          m.depthWrite = true;
-          m.side = THREE.DoubleSide;
-          if (m.roughness === undefined) m.roughness = 0.8;
-          if (m.metalness === undefined) m.metalness = 0.0;
-          if ("transmission" in m) m.transmission = 0;
-          m.needsUpdate = true;
-        };
-        Array.isArray(o.material) ? o.material.forEach(fix) : fix(o.material);
-      }
-    });
-
-    console.log("body mesh:", body?.name || "NOT IN GLB");
-
-    // 테스트용 강제 머티리얼 (선택)
-    if (body) {
-      body.material = new THREE.MeshStandardMaterial({
-        color: 0x6a7a7a,
-        roughness: 0.6,
-        metalness: 0.0,
-        side: THREE.DoubleSide,
-      });
+    // 텍스처가 이미 준비된 경우 바로 적용
+    if (rdMat) {
+      applyRDToNamedMeshes(modelLoaded);
+      console.log("✅ RD texture applied (after texture)");
     }
 
     // 애니메이션
-    mixer = new THREE.AnimationMixer(model);
+    mixer = new THREE.AnimationMixer(modelLoaded);
     const clip =
       THREE.AnimationClip.findByName(
         gltf.animations,
@@ -96,7 +111,23 @@ loader.load(
   (err) => console.error("GLB load error:", err)
 );
 
-// 리사이즈
+// ------------------------------------------------------------------
+// RD 적용 함수
+function applyRDToNamedMeshes(root) {
+  const hits = [];
+  root.traverse((o) => {
+    if (!o.isMesh) return;
+    if (/^(body(\.\d+)?|ball(\.\d+)?)$/i.test(o.name)) {
+      o.material = rdMat;
+      o.castShadow = o.receiveShadow = true;
+      console.log("RD applied →", o.name);
+      hits.push(o.name);
+    }
+  });
+  console.log(`RD applied count: ${hits.length}`, hits);
+}
+
+// ------------------------------------------------------------------
 window.addEventListener("resize", () => {
   camera.aspect = window.innerWidth / window.innerHeight;
   camera.updateProjectionMatrix();

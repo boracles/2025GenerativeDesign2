@@ -47,14 +47,20 @@ void main() {
   float mid = 1.0 - smoothstep(0.20, 0.00, abs(V - 0.5)); // 0.5±0.20
   float edge = smoothstep(0.06, 0.14, grad) * mid;
 
-  // 색상 합성
+  // --- 기존 색 합성 ---
   vec3 TEAL = vec3(11.0 / 255.0, 104.0 / 255.0, 133.0 / 255.0);
-  vec3 WHITE = vec3(1.0);
   vec3 RED = vec3(0.90, 0.12, 0.20);
 
-  vec3 col = TEAL;
-  col = mix(col, WHITE, clamp(core, 0.0, 1.0));
-  col = mix(col, RED, clamp(edge * 0.8, 0.0, 1.0));
+// ⛔ WHITE 섞던 줄은 지웁니다.
+// col = mix(col, WHITE, clamp(core, 0.0, 1.0));
 
-  outColor = vec4(col, 1.0);
+// ✅ 흰색은 '투명' 처리: 색은 TEAL↔RED만 쓰고, 알파는 core 마스크로
+  vec3 col = mix(TEAL, RED, clamp(edge * 0.8, 0.0, 1.0));
+
+// core를 조금 더 안정적으로(깜빡임 방지 여유 구간)
+  float coreMask = clamp(core, 0.0, 1.0);
+// 투명화에 소량 히스테리시스(여유) 부여
+  float alpha = 1.0 - smoothstep(0.08, 0.22, coreMask); // core↑ → alpha↓(투명)
+
+  outColor = vec4(col, alpha);
 }

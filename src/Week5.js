@@ -1,6 +1,19 @@
 import * as THREE from "three";
 
 const hud = document.getElementById("hud");
+if (hud) {
+  hud.textContent = "R: reseed (시드 다시 만들기)";
+  hud.style.position = "fixed";
+  hud.style.top = "10px";
+  hud.style.left = "10px";
+  hud.style.color = "#fff";
+  hud.style.fontFamily = "monospace";
+  hud.style.fontSize = "14px";
+  hud.style.zIndex = "1000";
+  hud.style.background = "rgba(0,0,0,0.5)";
+  hud.style.padding = "4px 8px";
+  hud.style.borderRadius = "4px";
+}
 if (hud) hud.textContent = "R: reseed (시드 다시 만들기)";
 
 // 0. WebGL2 필수 체크 + 서버에서 실행 권장
@@ -14,10 +27,16 @@ if (!isWebGL2) {
   );
 }
 
-const renderer = new THREE.WebGLRenderer({ antialias: false });
+const renderer = new THREE.WebGLRenderer({
+  antialias: false,
+  alpha: true,
+  preserveDrawingBuffer: true,
+  premultipliedAlpha: false,
+});
 renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
-renderer.setClearColor(0x111111, 1);
+renderer.setClearColor(0x000000, 0); // 완전 투명 클리어 (검정+알파0)
+renderer.clearColor();
 document.body.appendChild(renderer.domElement);
 
 // 확장 체크(모바일/브라우저별)
@@ -54,7 +73,7 @@ quad.setAttribute(
 quad.setIndex([0, 1, 2, 2, 1, 3]);
 
 // 3. 상태 텍스처 (U,V를 RG로 저장)
-const SIZE = 512;
+const SIZE = 1024;
 const stateRT = new THREE.WebGLRenderTarget(SIZE, SIZE, {
   type: THREE.FloatType,
   minFilter: THREE.NearestFilter,
@@ -199,3 +218,57 @@ renderer.setAnimationLoop(() => {
   displayMat.uniforms.uState.value = ping.texture;
   renderer.render(sceneDisplay, camera);
 });
+
+// PNG 저장 버튼
+const btn = document.createElement("button");
+btn.textContent = "💾 Save PNG";
+btn.style.position = "fixed";
+btn.style.top = "10px";
+btn.style.right = "10px";
+btn.style.zIndex = "1001";
+btn.style.padding = "6px 10px";
+btn.style.fontSize = "14px";
+btn.style.border = "none";
+btn.style.borderRadius = "4px";
+btn.style.background = "#222";
+btn.style.color = "#fff";
+btn.style.cursor = "pointer";
+btn.style.opacity = "0.8";
+btn.onmouseenter = () => (btn.style.opacity = "1");
+btn.onmouseleave = () => (btn.style.opacity = "0.8");
+document.body.appendChild(btn);
+
+function savePNG(targetSize = 1024, filename = "reaction_diffusion.png") {
+  // 1. 현재 상태 백업
+  const oldPR = renderer.getPixelRatio();
+  const oldW = renderer.domElement.width;
+  const oldH = renderer.domElement.height;
+
+  // 2. 정사각 해상도로 전환 (CSS 크기는 유지)
+  renderer.setPixelRatio(1); // 픽셀 수 = targetSize 정확히
+  renderer.setSize(targetSize, targetSize, false);
+
+  // uViewport | 타일링도 정사각 기준으로 갱신
+  viewport.set(targetSize, targetSize);
+  syncTiles();
+
+  // 3. 최신 프레임 보장 후 캡처
+  renderer.render(sceneDisplay, camera);
+  const dataURL = renderer.domElement.toDataURL("image/png");
+
+  // 4. 다운로드
+  const a = document.createElement("a");
+  a.href = dataURL;
+  a.download = filename;
+  a.click();
+
+  // 5. 원래 상태 복원
+  renderer.setPixelRatio(oldPR);
+  renderer.setSize(window.innerWidth, window.innerHeight);
+  viewport.set(window.innerWidth, window.innerHeight);
+  syncTiles();
+}
+
+btn.addEventListener("click", () =>
+  savePNG(1024, "reaction_diffusion_1024.png")
+);

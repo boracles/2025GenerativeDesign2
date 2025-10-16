@@ -35,6 +35,9 @@ const raycaster = new THREE.Raycaster();
 const plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0); // y=0 평면
 const _pt = new THREE.Vector3();
 
+const DEBUG_SENSE = true; // 감지 시각화 ON/OFF
+const SENSE_SAMPLE = 12; // 화살표를 그릴 샘플 개체 수(과부하 방지)
+
 // ──────────────────────────────────────────────
 // 기본 세팅
 const scene = new THREE.Scene();
@@ -106,6 +109,22 @@ const positions = new Array(COUNT);
 const objects = new Array(COUNT);
 const mixers = new Map();
 const actions = new Map();
+
+// [Sense] 상태 벡터 (이웃 속도 감지용)
+const vel = Array.from(
+  { length: COUNT },
+  () =>
+    new THREE.Vector3(
+      THREE.MathUtils.randFloatSpread(0.1),
+      0,
+      THREE.MathUtils.randFloatSpread(0.1)
+    )
+);
+const acc = Array.from({ length: COUNT }, () => new THREE.Vector3());
+
+// [Sense] 감지 반경 파라미터
+const NEIGHBOR_R = 4.0; // 이웃으로 인식하는 반경
+const NEIGHBOR_R2 = NEIGHBOR_R * NEIGHBOR_R;
 
 (function initLayout() {
   let i = 0;
@@ -281,6 +300,115 @@ function showPartsMeshes(root) {
   root.traverse((o) => {
     if (o.isMesh) o.visible = true;
   });
+}
+
+// Sense Debug: Neighbor Radius Rings
+let ringInst = null;
+
+function buildNeighborRings() {
+  const ringGeo = new THREE.RingGeometry(NEIGHBOR_R * 0.98, NEIGHBOR_R, 40);
+  ringGeo.rotateX(-Math.PI / 2); // XZ 평면으로
+  const ringMat = new THREE.MeshBasicMaterial({
+    color: 0x6ec1ff,
+    transparent: true,
+    opacity: 0.25,
+    depthWrite: false,
+  });
+  ringInst = new THREE.InstancedMesh(ringGeo, ringMat, COUNT);
+  ringInst.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+  for (let i = 0; i < COUNT; i++) ringInst.setMatrixAt(i, OFF_MAT);
+  scene.add(ringInst);
+}
+
+function updateNeighborRings() {
+  if (!ringInst) return;
+  const m = new THREE.Matrix4();
+  for (let i = 0; i < COUNT; i++) {
+    const p = positions[i];
+    m.makeTranslation(p.x, 0.02, p.z);
+    ringInst.setMatrixAt(i, m);
+  }
+  ringInst.instanceMatrix.needsUpdate = true;
+}
+
+// Sense Debug: Gradient pull (-∇ρ) and Global Flow arrows
+const gradArrows = [];
+const flowArrows = [];
+const GRAD_EPS = 1e-3;
+const SHOW_FLOW = true;
+
+function buildSenseArrows() {
+  const n = Math.min(SENSE_SAMPLE, COUNT);
+  for (let i = 0; i < n; i++) {
+    const ga = new THREE.ArrowHelper(
+      new THREE.Vector3(1, 0, 0),
+      new THREE.Vector3(),
+      1,
+      0xff6699
+    );
+    const fa = new THREE.ArrowHelper(
+      new THREE.Vector3(1, 0, 0),
+      new THREE.Vector3(),
+      1,
+      0x00ffaa
+    );
+    [
+      ga.cone.material,
+      ga.line.material,
+      fa.cone.material,
+      fa.line.material,
+    ].forEach((m) => {
+      m.depthWrite = false;
+      m.depthTest = false;
+    });
+    ga.visible = false;
+    fa.visible = false;
+    scene.add(ga, fa);
+    gradArrows.push(ga);
+    flowArrows.push(fa);
+  }
+}
+
+function updateSenseArrows(tSec) {
+  if (!gradArrows.length) return;
+
+  // 모두 숨기고 시작
+  for (let i = 0; i < gradArrows.length; i++) {
+    gradArrows[i].visible = false;
+    flowArrows[i].visible = false;
+  }
+
+  const step = Math.max(1, Math.floor(COUNT / gradArrows.length));
+  let k = 0;
+  for (let i = 0; i < COUNT && k < gradArrows.length; i += step, k++) {
+    const s = sense(i, tSec);
+    const p = positions[i];
+    const base = new THREE.Vector3(p.x, 0.05, p.z);
+
+    // -∇ρ (끌림) — 충분히 클 때만 표시
+    const gx = -s.grad.x,
+      gz = -s.grad.y;
+    const gLen = Math.hypot(gx, gz);
+    if (gLen > GRAD_EPS) {
+      const dir = new THREE.Vector3(gx / gLen, 0, gz / gLen);
+      const len = Math.min(2.0, gLen * 3.0 + 0.2);
+      const ga = gradArrows[k];
+      ga.position.copy(base);
+      ga.setDirection(dir);
+      ga.setLength(len, 0.3 * len, 0.2 * len);
+      ga.visible = true;
+    }
+
+    // 전역 흐름 — 필요할 때만
+    if (SHOW_FLOW) {
+      const f3 = new THREE.Vector3(s.flow.x, 0, s.flow.y);
+      const fa = flowArrows[k];
+      fa.position.copy(base).add(new THREE.Vector3(0, 0.01, 0));
+      fa.setDirection(f3);
+      fa.setLength(1.2, 0.25, 0.15);
+      fa.visible = true;
+    }
+  }
 }
 
 // ──────────────────────────────────────────────
@@ -463,6 +591,11 @@ loader.load(GLB_PATH, (gltf) => {
     objects[i] = root;
   }
   reselectionPass(true);
+
+  if (DEBUG_SENSE) {
+    buildNeighborRings();
+    buildSenseArrows();
+  }
 });
 
 // RD 텍스처
@@ -551,6 +684,90 @@ function visualizeEmitters() {
   });
 }
 
+// [Sense] 밀도장 샘플러: ρ(x,z) — 가우시안 합
+function densityAt(x, z) {
+  let d = 0;
+  for (let i = 0; i < emitters.length; i++) {
+    const e = emitters[i];
+    const dx = x - e.x,
+      dz = z - e.z;
+    const s2 = e.spread * e.spread;
+    d +=
+      e.intensity * Math.exp(-(dx * dx + dz * dz) / (2 * Math.max(1e-4, s2)));
+  }
+  return d;
+}
+
+// [Sense] 수치 그라디언트: ∇ρ(x,z)
+function densityGrad(x, z, eps = 0.25) {
+  const dpx = densityAt(x + eps, z);
+  const dnx = densityAt(x - eps, z);
+  const dpz = densityAt(x, z + eps);
+  const dnz = densityAt(x, z - eps);
+  return new THREE.Vector2((dpx - dnx) / (2 * eps), (dpz - dnz) / (2 * eps));
+}
+
+// [Sense] 전역 흐름(빛/바람/염도 등) — 느리게 방향이 바뀌는 단위 벡터
+function envFlow(tSec) {
+  const th = 0.35 * Math.sin(tSec * 0.05) + 1.1;
+  return new THREE.Vector2(Math.cos(th), Math.sin(th));
+}
+
+// [Sense] 한 개체(i)가 환경을 '감지'한 결과를 반환
+// 반환값: {
+//   nbrCount: number,
+//   nbrCenter: THREE.Vector2 (이웃 중심 방향; 없으면 (0,0)),
+//   nbrVel: THREE.Vector2 (이웃 평균 속도; 없으면 (0,0)),
+//   rho: number (교란장 밀도),
+//   grad: THREE.Vector2 (∇ρ, 밀도 증가 방향),
+//   flow: THREE.Vector2 (전역 흐름 단위 벡터)
+// }
+function sense(i, tSec) {
+  const pi = positions[i];
+  // ── 1) 주변 존재 감지
+  let cnt = 0;
+  const center = new THREE.Vector2(0, 0);
+  const avgVel = new THREE.Vector2(0, 0);
+
+  for (let j = 0; j < COUNT; j++) {
+    if (j === i) continue;
+    const pj = positions[j];
+    const dx = pj.x - pi.x,
+      dz = pj.z - pi.z;
+    const d2 = dx * dx + dz * dz;
+    if (d2 <= NEIGHBOR_R2) {
+      cnt++;
+      center.x += pj.x;
+      center.y += pj.z;
+      avgVel.x += vel[j].x;
+      avgVel.y += vel[j].z;
+    }
+  }
+
+  if (cnt > 0) {
+    center.multiplyScalar(1 / cnt).sub(new THREE.Vector2(pi.x, pi.z)); // (이웃중심 - 나)
+    if (center.lengthSq() > 0) center.normalize();
+    avgVel.multiplyScalar(1 / cnt);
+    if (avgVel.lengthSq() > 0) avgVel.normalize();
+  }
+
+  // ── 2) (선택) 외부 자극/교란장 감지
+  const rho = densityAt(pi.x, pi.z);
+  const grad = densityGrad(pi.x, pi.z); // 밀도 증가 방향
+
+  // ── 3) 전체 흐름 감지
+  const flow = envFlow(tSec); // 단위 벡터
+
+  return {
+    nbrCount: cnt,
+    nbrCenter: center,
+    nbrVel: avgVel,
+    rho,
+    grad,
+    flow,
+  };
+}
+
 // 클릭 핸들러 교체:
 window.addEventListener("click", (ev) => {
   const ndc = new THREE.Vector3(
@@ -582,6 +799,11 @@ function animate() {
   const dt = CLOCK.getDelta();
   updateDisturbanceField(dt);
   const t = performance.now() * 0.001;
+
+  if (DEBUG_SENSE) {
+    updateNeighborRings();
+    updateSenseArrows(t);
+  }
 
   // 근거리 스킨드: 타임스케일 지터
   animSet.forEach((idx) => {

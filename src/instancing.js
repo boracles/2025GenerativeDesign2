@@ -38,6 +38,27 @@ const _pt = new THREE.Vector3();
 const DEBUG_SENSE = true; // 감지 시각화 ON/OFF
 const SENSE_SAMPLE = 12; // 화살표를 그릴 샘플 개체 수(과부하 방지)
 
+// 규칙 가중치
+const W_SEP = 1.2; // Separation (떨어짐)
+const W_COH = 0.8; // Cohesion (가까워짐)
+const W_ALI = 0.6; // Alignment (방향 정렬)
+const W_PULL = 1.0; // External Pull (외부 자극)
+const W_VTX = 0.8; // Vortex (소용돌이)
+const VORTEX_THRESHOLD = 0.9; // 밀도 임계값 (ρ)
+
+const MAX_FORCE = 0.08; // 한 프레임당 최대 조향력
+const MAX_SPEED = 1.2; // 최대 속도
+const DAMPING = 0.992; // 감쇠 (마찰)
+
+const USE_FLOW = true; // 전역 흐름 사용 여부
+const W_FLOW = 0.25; // 전역 흐름 비중(ali와 별도)
+
+const CENTER_K = 0.015; // 0.01~0.03 사이로 조절
+
+const WORLD_RADIUS = 22; // 무대 반경(카메라 셋업에 맞춰 조절)
+const WALL_WIDTH = 6; // 경계 완충 폭
+const WALL_K = 0.035; // 벽 반발 세기
+
 // ──────────────────────────────────────────────
 // 기본 세팅
 const scene = new THREE.Scene();
@@ -411,6 +432,98 @@ function updateSenseArrows(tSec) {
   }
 }
 
+// 조향력 크기 제한 함수
+function limitVec2(v, max) {
+  const len = v.length();
+  if (len > max) v.multiplyScalar(max / len);
+  return v;
+}
+
+// ──────────────────────────────────────────────
+// 5️⃣ 행동(Act) — 물리 상태 업데이트
+function updateBoids(dt, tSec) {
+  // 1) 의사결정: 감지값 → 조향력(steer)
+  for (let i = 0; i < COUNT; i++) {
+    const s = sense(i, tSec);
+    const pi = positions[i];
+
+    // 부분 힘들
+    const sep = s.nbrCenter.clone().multiplyScalar(-1); // Separation
+    const coh = s.nbrCenter.clone(); // Cohesion
+    const ali = s.nbrVel.lengthSq()
+      ? s.nbrVel.clone().normalize() // Alignment(이웃만)
+      : new THREE.Vector2(0, 0);
+    const flowSteer = USE_FLOW
+      ? s.flow.clone().multiplyScalar(W_FLOW) // 전역 흐름(약하게)
+      : new THREE.Vector2(0, 0);
+    const pull = s.grad.clone().multiplyScalar(-1); // -∇ρ (구심력)
+    const vortex =
+      s.rho > VORTEX_THRESHOLD
+        ? new THREE.Vector2(-s.grad.y, s.grad.x).normalize() // ∇ρ ⟂
+        : new THREE.Vector2(0, 0);
+
+    // 기본 가중합
+    const steer = new THREE.Vector2()
+      .addScaledVector(sep, W_SEP)
+      .addScaledVector(coh, W_COH)
+      .addScaledVector(ali, W_ALI)
+      .addScaledVector(pull, W_PULL)
+      .addScaledVector(vortex, W_VTX)
+      .add(flowSteer);
+
+    // 소프트 월 + 센터 스프링을 여기서 추가 (선언 이후!)
+    steer.add(wallForce(pi));
+    steer.add(new THREE.Vector2(-pi.x, -pi.z).multiplyScalar(CENTER_K));
+
+    // 조향력 상한
+    const len = steer.length();
+    if (len > MAX_FORCE) steer.multiplyScalar(MAX_FORCE / len);
+
+    // 가속도 누적
+    acc[i].x += steer.x;
+    acc[i].z += steer.y;
+  }
+
+  // 2) 행동: 속도/위치 적분 + 시각 행렬 동기화
+  for (let i = 0; i < COUNT; i++) {
+    // 속도 적분
+    vel[i].x += acc[i].x;
+    vel[i].z += acc[i].z;
+    acc[i].set(0, 0, 0);
+
+    // 속도 상한
+    const spd = Math.hypot(vel[i].x, vel[i].z);
+    if (spd > MAX_SPEED) vel[i].multiplyScalar(MAX_SPEED / spd);
+
+    // 감쇠
+    vel[i].multiplyScalar(DAMPING);
+
+    // 위치 적분
+    positions[i].x += vel[i].x * dt;
+    positions[i].z += vel[i].z * dt;
+
+    // 방향(yaw) 정렬 + 행렬 갱신
+    const root = objects[i];
+    root.position.set(positions[i].x, positions[i].y, positions[i].z);
+    const yaw = Math.atan2(vel[i].x, vel[i].z);
+    root.rotation.set(0, yaw, 0);
+    root.updateMatrix();
+
+    // 원거리 인스턴스에도 동일 위치 반영
+    if (idleHasInstance[i]) {
+      instBody.setMatrixAt(i, root.matrix);
+      instLegBall.setMatrixAt(i, root.matrix);
+      instLegStick.setMatrixAt(i, root.matrix);
+    }
+  }
+
+  if (instBody) {
+    instBody.instanceMatrix.needsUpdate = true;
+    instLegBall.instanceMatrix.needsUpdate = true;
+    instLegStick.instanceMatrix.needsUpdate = true;
+  }
+}
+
 // ──────────────────────────────────────────────
 // 근거리 애니/원거리 인스턴싱 — 범위 좁힘 + 비동기화
 const animSet = new Set();
@@ -709,8 +822,9 @@ function densityGrad(x, z, eps = 0.25) {
 
 // [Sense] 전역 흐름(빛/바람/염도 등) — 느리게 방향이 바뀌는 단위 벡터
 function envFlow(tSec) {
-  const th = 0.35 * Math.sin(tSec * 0.05) + 1.1;
-  return new THREE.Vector2(Math.cos(th), Math.sin(th));
+  // 0.7* sin → 좌우로 오가며 평균 0, 크기는 작게
+  const th = 0.7 * Math.sin(tSec * 0.05);
+  return new THREE.Vector2(Math.cos(th), Math.sin(th)).multiplyScalar(0.3);
 }
 
 // [Sense] 한 개체(i)가 환경을 '감지'한 결과를 반환
@@ -768,6 +882,17 @@ function sense(i, tSec) {
   };
 }
 
+function wallForce(pi) {
+  const r = Math.hypot(pi.x, pi.z);
+  const inner = WORLD_RADIUS - WALL_WIDTH;
+  if (r <= inner) return new THREE.Vector2(0, 0);
+  const t = (r - inner) / Math.max(1e-6, WALL_WIDTH); // 0→1로 스무스
+  const nx = pi.x / (r || 1e-6),
+    nz = pi.z / (r || 1e-6); // 바깥쪽 노멀
+  // 안쪽으로 미는 힘 = -normal * 세기
+  return new THREE.Vector2(-nx, -nz).multiplyScalar(WALL_K * t);
+}
+
 // 클릭 핸들러 교체:
 window.addEventListener("click", (ev) => {
   const ndc = new THREE.Vector3(
@@ -804,6 +929,8 @@ function animate() {
     updateNeighborRings();
     updateSenseArrows(t);
   }
+
+  updateBoids(dt, t);
 
   // 근거리 스킨드: 타임스케일 지터
   animSet.forEach((idx) => {

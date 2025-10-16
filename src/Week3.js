@@ -3,7 +3,7 @@ import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 
 const scene = new THREE.Scene();
-scene.background = new THREE.Color(0x92ced8);
+scene.background = new THREE.Color(0x003e58);
 
 const camera = new THREE.PerspectiveCamera(
   60,

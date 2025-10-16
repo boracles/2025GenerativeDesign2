@@ -39,16 +39,19 @@ const DEBUG_SENSE = true; // 감지 시각화 ON/OFF
 const SENSE_SAMPLE = 12; // 화살표를 그릴 샘플 개체 수(과부하 방지)
 
 // 규칙 가중치
-const W_SEP = 1.2; // Separation (떨어짐)
-const W_COH = 0.8; // Cohesion (가까워짐)
+const W_SEP = 2.0; // Separation (떨어짐)
+const W_COH = 0.7; // Cohesion (가까워짐)
 const W_ALI = 0.6; // Alignment (방향 정렬)
 const W_PULL = 1.0; // External Pull (외부 자극)
 const W_VTX = 0.8; // Vortex (소용돌이)
 const VORTEX_THRESHOLD = 0.9; // 밀도 임계값 (ρ)
 
-const MAX_FORCE = 0.08; // 한 프레임당 최대 조향력
+const MAX_FORCE = 0.06; // 한 프레임당 최대 조향력
 const MAX_SPEED = 1.2; // 최대 속도
-const DAMPING = 0.992; // 감쇠 (마찰)
+const DAMPING = 0.997; // 감쇠 (마찰)
+
+// Sep 스무스/상한
+const MAX_SEP_FORCE = 0.9; // 이웃들에게서 합쳐도 Sep는 프레임당 이 값 초과 금지
 
 const USE_FLOW = true; // 전역 흐름 사용 여부
 const W_FLOW = 0.25; // 전역 흐름 비중(ali와 별도)
@@ -58,6 +61,46 @@ const CENTER_K = 0.015; // 0.01~0.03 사이로 조절
 const WORLD_RADIUS = 22; // 무대 반경(카메라 셋업에 맞춰 조절)
 const WALL_WIDTH = 6; // 경계 완충 폭
 const WALL_K = 0.035; // 벽 반발 세기
+
+// 개인 공간(Separation 영역)
+const SEP_R = Math.min(GAP_X, GAP_Z) * 0.55; // 0.75 → 0.55  (간격 3이면 1.65)
+const SEP_R2 = SEP_R * SEP_R;
+const SEP_EXP = 2.0;
+
+// 시야 제한(전방 콘): 0=180°, 1=0°
+const VIEW_DEG = 180; // 200 → 180
+const VIEW_COS = Math.cos(THREE.MathUtils.degToRad(VIEW_DEG * 0.5));
+
+const FIELD_MIX_K = 0.25; // ρ→Sep감쇠로 맵핑 강도
+const SEP_MIN_SCALE = 0.28; // Sep 최저 35%까지만 줄이기
+
+// 거리별 완만한 가중 램프
+function smooth01(x) {
+  return THREE.MathUtils.clamp(x, 0, 1);
+}
+
+// 개체 이질성(가중치 노이즈)
+const WSEP_i = Float32Array.from({ length: COUNT }, () =>
+  THREE.MathUtils.randFloat(0.9, 1.4)
+);
+const WCOH_i = Float32Array.from({ length: COUNT }, () =>
+  THREE.MathUtils.randFloat(0.8, 1.2)
+);
+const WALI_i = Float32Array.from({ length: COUNT }, () =>
+  THREE.MathUtils.randFloat(0.8, 1.25)
+);
+
+// 부유(레이놀즈 wander) 약하게
+const NOISE = 0.03; // 0.02~0.06
+function wander2(i, t) {
+  // 간단한 해시 기반 의사노이즈(라이브러리 없이)
+  const a = Math.sin(i * 127.1 + t * 1.73) * 43758.5453;
+  const b = Math.sin(i * 269.5 + t * 2.11) * 24634.6345;
+  return new THREE.Vector2(
+    a - Math.floor(a) - 0.5,
+    b - Math.floor(b) - 0.5
+  ).multiplyScalar(NOISE);
+}
 
 // ──────────────────────────────────────────────
 // 기본 세팅
@@ -131,6 +174,16 @@ const objects = new Array(COUNT);
 const mixers = new Map();
 const actions = new Map();
 
+// ── Anti-jitter (회전/조향 스무딩)
+const MAX_TURN_RAD = Math.PI * 0.9; // 초당 최대 회전각 (라디안)
+const STEER_ALPHA = 0.35; // 조향 로우패스 (0.2~0.5)
+const EPS_STEER = 0.004; // 미세 조향 데드존
+
+const PULL_GAIN = 2.2; // 외부 자극(−∇ρ) 증폭
+
+// 이전 프레임 조향 버퍼
+const steerPrev = Array.from({ length: COUNT }, () => new THREE.Vector2());
+
 // [Sense] 상태 벡터 (이웃 속도 감지용)
 const vel = Array.from(
   { length: COUNT },
@@ -153,9 +206,9 @@ const NEIGHBOR_R2 = NEIGHBOR_R * NEIGHBOR_R;
     for (let c = 0; c < COLS; c++) {
       if (i >= COUNT) break;
       positions[i] = new THREE.Vector3(
-        (c - (COLS - 1) / 2) * GAP_X,
+        (c - (COLS - 1) / 2) * GAP_X + THREE.MathUtils.randFloatSpread(0.5),
         0,
-        (r - (ROWS - 1) / 2) * GAP_Z
+        (r - (ROWS - 1) / 2) * GAP_Z + THREE.MathUtils.randFloatSpread(0.5)
       );
       i++;
     }
@@ -440,76 +493,191 @@ function limitVec2(v, max) {
 }
 
 // ──────────────────────────────────────────────
-// 5️⃣ 행동(Act) — 물리 상태 업데이트
+// 5️⃣ 행동(Act) — 물리 적분 + 평형 복귀
 function updateBoids(dt, tSec) {
   // 1) 의사결정: 감지값 → 조향력(steer)
   for (let i = 0; i < COUNT; i++) {
     const s = sense(i, tSec);
     const pi = positions[i];
 
-    // 부분 힘들
-    const sep = s.nbrCenter.clone().multiplyScalar(-1); // Separation
-    const coh = s.nbrCenter.clone(); // Cohesion
-    const ali = s.nbrVel.lengthSq()
-      ? s.nbrVel.clone().normalize() // Alignment(이웃만)
-      : new THREE.Vector2(0, 0);
-    const flowSteer = USE_FLOW
-      ? s.flow.clone().multiplyScalar(W_FLOW) // 전역 흐름(약하게)
-      : new THREE.Vector2(0, 0);
-    const pull = s.grad.clone().multiplyScalar(-1); // -∇ρ (구심력)
+    let sep = new THREE.Vector2(0, 0);
+    let coh = new THREE.Vector2(0, 0);
+    let ali = new THREE.Vector2(0, 0);
+    let cohN = 0,
+      aliN = 0;
+
+    // 내 진행 방향(시야 콘 계산용). 속도가 거의 0이면 전방(0,0,1)로 가정
+    const v = vel[i];
+    const fwd =
+      v.lengthSq() > 1e-6
+        ? new THREE.Vector2(v.x, v.z).normalize()
+        : new THREE.Vector2(0, 1);
+
+    // [추가] 정지 근처 감쇠 계수
+    const speed = Math.hypot(v.x, v.z);
+    const slow = THREE.MathUtils.smoothstep(speed, 0.0, 0.15); // 0~0.15m/s
+
+    for (let j = 0; j < COUNT; j++) {
+      if (j === i) continue;
+      const pj = positions[j];
+      const dx = pj.x - pi.x,
+        dz = pj.z - pi.z;
+      const d2 = dx * dx + dz * dz;
+      if (d2 > NEIGHBOR_R2) continue;
+
+      // 시야 제한(전방 콘)
+      const dir2 = new THREE.Vector2(dx, dz);
+      const dirN = dir2.clone().normalize();
+      if (dirN.dot(fwd) < VIEW_COS) continue; // 뒤쪽 이웃은 무시 → 대칭 붕괴
+
+      const d = Math.sqrt(Math.max(1e-6, d2));
+
+      // 거리 가중 램프: SEP_R .. NEIGHBOR_R 사이 0→1
+      const ramp = smooth01((d - SEP_R) / Math.max(1e-6, NEIGHBOR_R - SEP_R));
+
+      // Separation (깊이 기반: 겹치는 비율 dep ∈ [0,1]) + 클램프
+      if (d2 < SEP_R2) {
+        const dep = 1.0 - d / SEP_R; // 깊이 (경계=0, 정면충돌~1)
+        // 완만한 커브(큐빅)로 과도 반발 억제
+        const w = dep * dep * (1.5 - dep); // smoothstep 변형
+        sep.addScaledVector(dirN.clone().multiplyScalar(-1), w);
+      } else {
+        // Cohesion: 멀리 있을수록 가중↑
+        coh.addScaledVector(dirN, ramp);
+        cohN++;
+        // Alignment: 멀리 있을수록 가중↑
+        ali.addScaledVector(
+          new THREE.Vector2(vel[j].x, vel[j].z).normalize(),
+          ramp
+        );
+        aliN++;
+      }
+    }
+
+    if (cohN > 0) coh.multiplyScalar(1 / cohN).normalize();
+    if (aliN > 0) ali.multiplyScalar(1 / aliN).normalize();
+
+    // Sep 총량을 프레임당 상한으로 제한 (튀는 반발 억제)
+    if (sep.length() > MAX_SEP_FORCE) sep.setLength(MAX_SEP_FORCE);
+
+    // [3-A] 정지일수록 응집/정렬을 자동 감쇠
+    coh.multiplyScalar(1.0 - slow);
+    ali.multiplyScalar(1.0 - slow);
+
+    // 외부 자극/소용돌이/전역 흐름
+    const pull = s.grad.clone().multiplyScalar(-PULL_GAIN); // -∇ρ × gain
+
     const vortex =
       s.rho > VORTEX_THRESHOLD
-        ? new THREE.Vector2(-s.grad.y, s.grad.x).normalize() // ∇ρ ⟂
+        ? new THREE.Vector2(-s.grad.y, s.grad.x).normalize()
         : new THREE.Vector2(0, 0);
+    const flowSt = USE_FLOW
+      ? s.flow.clone().multiplyScalar(W_FLOW)
+      : new THREE.Vector2(0, 0);
 
-    // 기본 가중합
+    // [3-B] 벽 가장자리 혼합: sep 30% 감소
+    {
+      const r = Math.hypot(pi.x, pi.z);
+      const edgeT = THREE.MathUtils.clamp(
+        (r - (WORLD_RADIUS - WALL_WIDTH)) / Math.max(1e-6, WALL_WIDTH),
+        0,
+        1
+      );
+      sep.multiplyScalar(1.0 - 0.3 * edgeT);
+    }
+
+    // [필드 기반 Sep 완화] ρ가 진할수록 Separation을 완만하게
+    {
+      const f = THREE.MathUtils.clamp(s.rho * FIELD_MIX_K, 0, 1); // 0~1
+      const scale = THREE.MathUtils.lerp(1.0, SEP_MIN_SCALE, f); // 1→0.35
+      sep.multiplyScalar(scale);
+    }
+
+    // 개체별 가중치로 헤테로 제어
     const steer = new THREE.Vector2()
-      .addScaledVector(sep, W_SEP)
-      .addScaledVector(coh, W_COH)
-      .addScaledVector(ali, W_ALI)
+      .addScaledVector(sep, W_SEP * WSEP_i[i])
+      .addScaledVector(coh, W_COH * WCOH_i[i])
+      .addScaledVector(ali, W_ALI * WALI_i[i])
       .addScaledVector(pull, W_PULL)
       .addScaledVector(vortex, W_VTX)
-      .add(flowSteer);
+      .add(flowSt);
+    if (speed > 0.05) steer.add(wander2(i, tSec)); // 속도 있을 때만 부유
 
-    // 소프트 월 + 센터 스프링을 여기서 추가 (선언 이후!)
+    // [Anti-jitter #1] 조향 로우패스 + 데드존
+    steerPrev[i].lerp(steer, STEER_ALPHA);
+    steer.copy(steerPrev[i]);
+    if (steer.lengthSq() < EPS_STEER * EPS_STEER) steer.set(0, 0);
+
+    // 벽/센터
     steer.add(wallForce(pi));
     steer.add(new THREE.Vector2(-pi.x, -pi.z).multiplyScalar(CENTER_K));
 
-    // 조향력 상한
+    // 상한 & 가속도 누적
     const len = steer.length();
     if (len > MAX_FORCE) steer.multiplyScalar(MAX_FORCE / len);
-
-    // 가속도 누적
     acc[i].x += steer.x;
     acc[i].z += steer.y;
   }
 
-  // 2) 행동: 속도/위치 적분 + 시각 행렬 동기화
+  // 2) 행동(Act): 속도/위치 적분 + 시각 행렬 동기화
   for (let i = 0; i < COUNT; i++) {
-    // 속도 적분
+    // ── (1) 속도 적분
+    // [Anti-jitter #2] 회전 속도 제한 (2D)
+    {
+      const v2 = new THREE.Vector2(vel[i].x, vel[i].z);
+      const des2 = new THREE.Vector2(vel[i].x + acc[i].x, vel[i].z + acc[i].z);
+
+      if (des2.lengthSq() > 1e-12 && v2.lengthSq() > 1e-12) {
+        // 현재각 → 목표각의 차이를 dt만큼 제한
+        let ang1 = Math.atan2(v2.y, v2.x);
+        let ang2 = Math.atan2(des2.y, des2.x);
+        let dAng = ang2 - ang1;
+        while (dAng > Math.PI) dAng -= 2 * Math.PI;
+        while (dAng < -Math.PI) dAng += 2 * Math.PI;
+
+        const maxStep = MAX_TURN_RAD * dt;
+        const step = THREE.MathUtils.clamp(dAng, -maxStep, maxStep);
+        const newAng = ang1 + step;
+        const mag = des2.length(); // 목표 속도 크기 유지
+
+        const limited = new THREE.Vector2(
+          Math.cos(newAng) * mag,
+          Math.sin(newAng) * mag
+        );
+        acc[i].x = limited.x - v2.x;
+        acc[i].z = limited.y - v2.y;
+      }
+    }
+    // 이제 (1) 속도 적분
     vel[i].x += acc[i].x;
     vel[i].z += acc[i].z;
+
     acc[i].set(0, 0, 0);
 
-    // 속도 상한
+    // ── (2) 속도 클램프
     const spd = Math.hypot(vel[i].x, vel[i].z);
     if (spd > MAX_SPEED) vel[i].multiplyScalar(MAX_SPEED / spd);
 
-    // 감쇠
+    // ── (3) 감쇠 (마찰)
     vel[i].multiplyScalar(DAMPING);
 
-    // 위치 적분
+    // [Anti-jitter #3] 정지 스냅
+    if (Math.hypot(vel[i].x, vel[i].z) < 0.02) {
+      vel[i].set(0, 0, 0);
+    }
+
+    // ── (4) 위치 적분
     positions[i].x += vel[i].x * dt;
     positions[i].z += vel[i].z * dt;
 
-    // 방향(yaw) 정렬 + 행렬 갱신
+    // ── (5) yaw 회전 (머리가 진행 방향으로)
     const root = objects[i];
     root.position.set(positions[i].x, positions[i].y, positions[i].z);
     const yaw = Math.atan2(vel[i].x, vel[i].z);
     root.rotation.set(0, yaw, 0);
     root.updateMatrix();
 
-    // 원거리 인스턴스에도 동일 위치 반영
+    // ── (6) 인스턴스에도 동기화
     if (idleHasInstance[i]) {
       instBody.setMatrixAt(i, root.matrix);
       instLegBall.setMatrixAt(i, root.matrix);
@@ -517,6 +685,7 @@ function updateBoids(dt, tSec) {
     }
   }
 
+  // ── (7) 인스턴스 갱신 알림
   if (instBody) {
     instBody.instanceMatrix.needsUpdate = true;
     instLegBall.instanceMatrix.needsUpdate = true;
@@ -755,27 +924,22 @@ const _camNow = new THREE.Vector3(),
 const emitters = []; // 활성화된 감정 에너지 소스(에미터) 목록
 
 const MAX_EMITTERS = 64; // 적당한 상한
-function addEmitter(x, z, intensity = 1.0, spread = 3.0, decay = 0.98) {
+// 클릭/타이머에서 쓰는 에미터 추가
+function addEmitter(x, z, intensity = 4.0, spread = 4.5, decayPerSec = 0.65) {
+  // intensity 4.0, spread 4.5로 ↑ : 끌림이 눈에 띄게
+  // decayPerSec=0.65 : 1초 뒤 65%로 (느리게 사라짐)
   if (emitters.length >= MAX_EMITTERS) emitters.shift();
-  emitters.push({
-    x,
-    z,
-    intensity,
-    spread,
-    age: 0,
-    decay: THREE.MathUtils.clamp(decay, 0.9, 0.999),
-  });
+  emitters.push({ x, z, intensity, spread, age: 0, decayPerSec });
 }
 
-// 감정 필드 업데이트
+// 초 단위 감쇠로 변경 (프레임레이트 무관)
 function updateDisturbanceField(dt) {
   for (let i = emitters.length - 1; i >= 0; i--) {
     const e = emitters[i];
     e.age += dt;
-    e.intensity *= e.decay; // 감쇠
-    if (e.intensity < 0.01) {
-      emitters.splice(i, 1); // 거의 사라지면 삭제
-    }
+    // intensity *= decayPerSec^(dt)  (dt=초)
+    e.intensity *= Math.pow(e.decayPerSec, dt);
+    if (e.intensity < 0.02) emitters.splice(i, 1);
   }
 }
 
@@ -812,7 +976,8 @@ function densityAt(x, z) {
 }
 
 // [Sense] 수치 그라디언트: ∇ρ(x,z)
-function densityGrad(x, z, eps = 0.25) {
+function densityGrad(x, z, eps = 0.5) {
+  // 0.25 → 0.5
   const dpx = densityAt(x + eps, z);
   const dnx = densityAt(x - eps, z);
   const dpz = densityAt(x, z + eps);
@@ -886,11 +1051,11 @@ function wallForce(pi) {
   const r = Math.hypot(pi.x, pi.z);
   const inner = WORLD_RADIUS - WALL_WIDTH;
   if (r <= inner) return new THREE.Vector2(0, 0);
-  const t = (r - inner) / Math.max(1e-6, WALL_WIDTH); // 0→1로 스무스
+
+  const t = (r - inner) / Math.max(1e-6, WALL_WIDTH); // 0→1
   const nx = pi.x / (r || 1e-6),
     nz = pi.z / (r || 1e-6); // 바깥쪽 노멀
-  // 안쪽으로 미는 힘 = -normal * 세기
-  return new THREE.Vector2(-nx, -nz).multiplyScalar(WALL_K * t);
+  return new THREE.Vector2(-nx, -nz).multiplyScalar(WALL_K * t); // 안쪽으로 미는 힘
 }
 
 // 클릭 핸들러 교체:
@@ -902,7 +1067,8 @@ window.addEventListener("click", (ev) => {
   );
   raycaster.setFromCamera(ndc, camera);
   if (raycaster.ray.intersectPlane(plane, _pt)) {
-    addEmitter(_pt.x, _pt.z, 1.0, 3.0);
+    // AFTER (기본값: intensity=4.0, spread=4.5, decayPerSec=0.65)
+    addEmitter(_pt.x, _pt.z);
     visualizeEmitters();
     console.log("Emitter added:", _pt.x.toFixed(2), _pt.z.toFixed(2));
   }

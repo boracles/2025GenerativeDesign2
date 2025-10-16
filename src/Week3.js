@@ -8,7 +8,12 @@ import * as BufferGeometryUtils from "three/addons/utils/BufferGeometryUtils.js"
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x003e58);
 
-const camera = new THREE.PerspectiveCamera(55, innerWidth / innerHeight, 0.1, 1000);
+const camera = new THREE.PerspectiveCamera(
+  55,
+  innerWidth / innerHeight,
+  0.1,
+  1000
+);
 camera.position.set(0, 18, 10);
 camera.lookAt(0, 0, 0);
 
@@ -47,22 +52,34 @@ addEventListener("resize", () => {
 
 // =============== FPS HUD(선택) ===============
 const hud = document.createElement("div");
-hud.style.cssText = "position:fixed;left:10px;top:10px;font:12px/1.2 ui-monospace,monospace;color:#eaf6ff;background:rgba(0,0,0,.35);padding:8px 10px;border-radius:8px;border:1px solid rgba(255,255,255,.12);z-index:9999;user-select:none;";
+hud.style.cssText =
+  "position:fixed;left:10px;top:10px;font:12px/1.2 ui-monospace,monospace;color:#eaf6ff;background:rgba(0,0,0,.35);padding:8px 10px;border-radius:8px;border:1px solid rgba(255,255,255,.12);z-index:9999;user-select:none;";
 document.body.appendChild(hud);
-let frames=0,last=performance.now(),fps=0,avg=0,samples=0;
+let frames = 0,
+  last = performance.now(),
+  fps = 0,
+  avg = 0,
+  samples = 0;
 function updateFPS() {
   const now = performance.now();
   frames++;
   if (now - last >= 1000) {
     fps = (frames * 1000) / (now - last);
-    frames = 0; last = now;
-    samples++; avg += (fps - avg) / samples;
+    frames = 0;
+    last = now;
+    samples++;
+    avg += (fps - avg) / samples;
     hud.innerHTML = `FPS: ${fps.toFixed(1)}<br>AVG: ${avg.toFixed(1)}`;
   }
 }
 
 // =============== 유틸 ===============
-const norm = (s) => s.toLowerCase().replace(/\s+/g,"").replace(/_/g,"").replace(/\.\d+$/,"");
+const norm = (s) =>
+  s
+    .toLowerCase()
+    .replace(/\s+/g, "")
+    .replace(/_/g, "")
+    .replace(/\.\d+$/, "");
 
 // =============== 메인 로직 ===============
 const clock = new THREE.Clock();
@@ -73,12 +90,12 @@ let shaderMat = null;
   const meta = await (await fetch("/VAT_meta.json")).json();
   const VCOUNT = meta.vertexCount;
   const FCOUNT = meta.frameCount;
-  const FPS    = meta.fps;
-  const BMIN   = new THREE.Vector3(...meta.boundsMin);
-  const BMAX   = new THREE.Vector3(...meta.boundsMax);
-  const TEX_W  = meta.layout.width;
-  const TEX_H  = meta.layout.height;
-  const PARTS  = meta.parts;
+  const FPS = meta.fps;
+  const BMIN = new THREE.Vector3(...meta.boundsMin);
+  const BMAX = new THREE.Vector3(...meta.boundsMax);
+  const TEX_W = meta.layout.width;
+  const TEX_H = meta.layout.height;
+  const PARTS = meta.parts;
 
   // 2) VAT 텍스처 로드 (Non-Color, Nearest)
   const positionTex = await new Promise((res, rej) => {
@@ -92,12 +109,15 @@ let shaderMat = null;
         tex.flipY = false;
         res(tex);
       },
-      undefined, rej
+      undefined,
+      rej
     );
   });
 
   // 3) GLB 로드
-  const gltf = await new GLTFLoader().loadAsync("./assets/models/Tentacle.glb");
+  const gltf = await new GLTFLoader().loadAsync(
+    "./assets/models/Tentacles.glb"
+  );
   const meshes = [];
   gltf.scene.traverse((o) => {
     if (o.isMesh && o.geometry?.attributes?.position) meshes.push(o);
@@ -122,7 +142,9 @@ let shaderMat = null;
     // 이름으로 못 찾으면 루프-버텍스 개수로 탐색 (non-indexed count)
     if (!mesh) {
       mesh = meshes.find((mm) => {
-        const cntNon = (mm.geometry.index ? mm.geometry.toNonIndexed() : mm.geometry).attributes.position.count;
+        const cntNon = (
+          mm.geometry.index ? mm.geometry.toNonIndexed() : mm.geometry
+        ).attributes.position.count;
         return cntNon === p.vcount;
       });
     }
@@ -132,12 +154,18 @@ let shaderMat = null;
     }
 
     // ★ non-indexed 강제
-    let gNon = mesh.geometry.index ? mesh.geometry.toNonIndexed() : mesh.geometry.clone();
+    let gNon = mesh.geometry.index
+      ? mesh.geometry.toNonIndexed()
+      : mesh.geometry.clone();
     const cntNon = gNon.attributes.position.count;
 
     if (cntNon !== p.vcount) {
-      console.warn(`[PART MISMATCH] ${p.name}: VAT=${p.vcount}; GLB(nonIdx)=${cntNon}`);
-      throw new Error(`[VAT] '${p.name}'의 루프 버텍스 수가 VAT와 다릅니다. (베이크/익스포트 기준을 통일하세요)`);
+      console.warn(
+        `[PART MISMATCH] ${p.name}: VAT=${p.vcount}; GLB(nonIdx)=${cntNon}`
+      );
+      throw new Error(
+        `[VAT] '${p.name}'의 루프 버텍스 수가 VAT와 다릅니다. (베이크/익스포트 기준을 통일하세요)`
+      );
     }
 
     geoms.push(gNon);
@@ -145,18 +173,22 @@ let shaderMat = null;
   }
 
   if (sumV !== VCOUNT) {
-    console.warn(`[SUM VCOUNT MISMATCH] meta.vertexCount=${VCOUNT}, sum(parts)=${sumV}`);
+    console.warn(
+      `[SUM VCOUNT MISMATCH] meta.vertexCount=${VCOUNT}, sum(parts)=${sumV}`
+    );
     // 강제 진행은 가능하지만, 데이터 불일치 시 애니가 어긋날 수 있음
   }
 
   // 5) 파츠 병합 (인덱스 없이)
-  let merged = BufferGeometryUtils.mergeGeometries(geoms, /*useGroups=*/true);
+  let merged = BufferGeometryUtils.mergeGeometries(geoms, /*useGroups=*/ true);
   if (!merged) throw new Error("[VAT] 병합 실패");
   if (merged.index) merged = merged.toNonIndexed();
 
   const liveCount = merged.attributes.position.count;
   if (liveCount !== VCOUNT) {
-    console.warn(`[LIVE COUNT] merged(nonIdx)=${liveCount}, meta.vertexCount=${VCOUNT}`);
+    console.warn(
+      `[LIVE COUNT] merged(nonIdx)=${liveCount}, meta.vertexCount=${VCOUNT}`
+    );
   }
 
   // vertexIndex (0..liveCount-1)
@@ -206,27 +238,27 @@ let shaderMat = null;
     fragmentShader: fsh,
     uniforms: {
       positionTex: { value: positionTex },
-      boundsMin:   { value: BMIN },
-      boundsMax:   { value: BMAX },
-      frameCount:  { value: FCOUNT },
+      boundsMin: { value: BMIN },
+      boundsMax: { value: BMAX },
+      frameCount: { value: FCOUNT },
       vertexCount: { value: VCOUNT },
-      fps:         { value: FPS },
-      globalTime:  { value: 0 },
-      texWidth:    { value: TEX_W },
-      texHeight:   { value: TEX_H },
+      fps: { value: FPS },
+      globalTime: { value: 0 },
+      texWidth: { value: TEX_W },
+      texHeight: { value: TEX_H },
     },
     side: THREE.DoubleSide,
   });
 
-// ★ instancing define 추가
-shaderMat.defines = shaderMat.defines || {};
-shaderMat.defines.USE_INSTANCING = 1;   // 일부 드라이버에서 필요
-shaderMat.needsUpdate = true;
+  // ★ instancing define 추가
+  shaderMat.defines = shaderMat.defines || {};
+  shaderMat.defines.USE_INSTANCING = 1; // 일부 드라이버에서 필요
+  shaderMat.needsUpdate = true;
 
   // 7) 인스턴싱
-  const INST = 100;            // 원하는 개수
+  const INST = 100; // 원하는 개수
   const COLS = 10;
-  const GAP  = 3.0;
+  const GAP = 3.0;
 
   const mesh = new THREE.InstancedMesh(merged, shaderMat, INST);
   const dummy = new THREE.Object3D();
@@ -247,7 +279,10 @@ shaderMat.needsUpdate = true;
     mesh.setMatrixAt(i, dummy.matrix);
     offsets[i] = Math.random() * 10.0;
   }
-  merged.setAttribute("instanceTimeOffset", new THREE.InstancedBufferAttribute(offsets, 1));
+  merged.setAttribute(
+    "instanceTimeOffset",
+    new THREE.InstancedBufferAttribute(offsets, 1)
+  );
   mesh.instanceMatrix.needsUpdate = true;
   mesh.frustumCulled = false;
   scene.add(mesh);
@@ -256,7 +291,7 @@ shaderMat.needsUpdate = true;
 })().catch((e) => console.error(e));
 
 // =============== 루프 ===============
-(function animate(){
+(function animate() {
   requestAnimationFrame(animate);
   const dt = clock.getDelta();
   if (shaderMat) shaderMat.uniforms.globalTime.value += dt;

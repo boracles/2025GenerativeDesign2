@@ -8,8 +8,28 @@ import { clone as cloneSkinned } from "three/addons/utils/SkeletonUtils.js";
 import * as BufferGeometryUtils from "three/addons/utils/BufferGeometryUtils.js";
 
 // ──────────────────────────────────────────────
-// 옵션
-const USE_RD = true;
+// TODO: 교체 포인트
+const GLB_PATH = "./assets/models/Tentacle.glb"; // 내 GLB 경로
+const RD_TEX_PATH = "./assets/textures/RD.png"; // RD 텍스처 경로
+const CLIP_NAME = "FeedingTentacle_WaveTest"; // 내 GLB 애니 클립명 (없으면 첫 클립 사용)
+const COUNT = 100; // 개체 수
+const COLS = 10; // 격자 열 수
+const GAP_X = 3.0,
+  GAP_Z = 3.0; // 격자 간격
+const USE_RD = true; // RD 사용 여부
+
+// 파츠 이름 패턴(내 모델에 맞게 필요시 수정)
+const BODY_RX = /body(\.\d+)?/i;
+const LEGBALL_RX = /leg[_\s-]?ball(\.\d+)?/i;
+const LEGSTICK_RX = /^(?!.*ball).*leg.*/i;
+
+// LOD 범위/빈도
+const MAX_ANIMATING = 8; // 근거리 스킨드 최대 개수
+const ANIM_RADIUS = 14.0; // 스킨드 반경
+const ANIM_RADIUS_HYST = 3.0; // 반경 히스테리시스
+const HYSTERESIS = 3.0; // 가장자리 히스테리시스
+const RESELECT_EVERY = 8; // 프레임마다 재선정 주기
+const MOVE_EPS = 0.25; // 카메라 이동 감지 임계
 
 // ──────────────────────────────────────────────
 // 기본 세팅
@@ -76,12 +96,7 @@ function updateFPS() {
 // 배치/상태
 const loader = new GLTFLoader();
 const CLOCK = new THREE.Clock();
-const COUNT = 100;
-const COLS = 10;
 const ROWS = Math.ceil(COUNT / COLS);
-const GAP_X = 3.0,
-  GAP_Z = 3.0;
-const GLB_PATH = "./assets/models/Tentacle.glb";
 
 const positions = new Array(COUNT);
 const objects = new Array(COUNT);
@@ -102,10 +117,6 @@ const actions = new Map();
     }
   }
 })();
-
-const BODY_RX = /body(\.\d+)?/i;
-const LEGBALL_RX = /leg[_\s-]?ball(\.\d+)?/i;
-const LEGSTICK_RX = /^(?!.*ball).*leg.*/i;
 
 // ──────────────────────────────────────────────
 // RD 텍스처
@@ -210,9 +221,15 @@ function buildInstancingPoolsFrom(root) {
       map: rdMat ? rdMat.map : null,
       alphaTest: 0.6,
     });
+
   instBody = new THREE.InstancedMesh(geomBody, mkMat(), COUNT);
   instLegBall = new THREE.InstancedMesh(geomBall, mkMat(), COUNT);
   instLegStick = new THREE.InstancedMesh(geomStick, mkMat(), COUNT);
+
+  // 인스턴스 행렬 사용 모드 (자주 갱신)
+  instBody.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+  instLegBall.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+  instLegStick.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
 
   for (let i = 0; i < COUNT; i++) {
     instBody.setMatrixAt(i, OFF_MAT);
@@ -264,17 +281,11 @@ function showPartsMeshes(root) {
 
 // ──────────────────────────────────────────────
 // 근거리 애니/원거리 인스턴싱 — 범위 좁힘 + 비동기화
-const MAX_ANIMATING = 8; // 12 → 8
-const RESELECT_EVERY = 8; // 10 → 8 (조금 더 자주)
-const ANIM_RADIUS = 14.0; // 22 → 14 (훨씬 좁게)
-const ANIM_RADIUS_HYST = 3.0; // 4 → 3
-const HYSTERESIS = 3.0; // 4 → 3
-
 const animSet = new Set();
 const idleSet = new Set();
 let baseClips = [];
 
-// ── 비동기화를 위한 개별 파라미터(인스턴스용)
+// 인스턴스용 비동기 파라미터
 const phase = Float32Array.from(
   { length: COUNT },
   () => Math.random() * Math.PI * 2
@@ -282,13 +293,13 @@ const phase = Float32Array.from(
 const driftPhase = Float32Array.from(
   { length: COUNT },
   () => Math.random() * Math.PI * 2
-); // 느린 드리프트 위상
+);
 const wobbleW = Float32Array.from({ length: COUNT }, () =>
   THREE.MathUtils.lerp(0.55, 0.9, Math.random())
-); // 주파수 다양화
+);
 const squashA = Float32Array.from({ length: COUNT }, () =>
   THREE.MathUtils.lerp(0.08, 0.16, Math.random())
-); // 진폭 다양화
+);
 const bendA = Float32Array.from({ length: COUNT }, () =>
   THREE.MathUtils.lerp(0.04, 0.09, Math.random())
 );
@@ -297,13 +308,13 @@ const bobA = Float32Array.from({ length: COUNT }, () =>
 );
 const jitterAmt = Float32Array.from({ length: COUNT }, () =>
   THREE.MathUtils.lerp(0.06, 0.14, Math.random())
-); // 드리프트 강도
+);
 
-// ── 스킨드용: timeScale 기본값 + 지터
-const baseTimeScale = new Map(); // idx -> base
+// 스킨드용: timeScale 지터
+const baseTimeScale = new Map();
 const jitterSpeed = Float32Array.from({ length: COUNT }, () =>
   THREE.MathUtils.lerp(0.08, 0.18, Math.random())
-); // 지터 속도
+);
 const jitterPhase = Float32Array.from(
   { length: COUNT },
   () => Math.random() * Math.PI * 2
@@ -314,18 +325,15 @@ function ensureMixer(idx) {
   const root = objects[idx];
   const mx = new THREE.AnimationMixer(root);
   const clip = baseClips.length
-    ? THREE.AnimationClip.findByName(baseClips, "FeedingTentacle_WaveTest") ||
-      baseClips[0]
+    ? THREE.AnimationClip.findByName(baseClips, CLIP_NAME) || baseClips[0]
     : null;
   if (clip) {
     const act = mx.clipAction(clip);
     act.play();
-    // 기본 타임스케일 다양화(0.75~1.25)
     const ts = THREE.MathUtils.lerp(0.75, 1.25, Math.random());
     act.timeScale = ts;
     baseTimeScale.set(idx, ts);
-    // 시작시간도 랜덤 오프셋
-    act.time = Math.random() * clip.duration;
+    act.time = Math.random() * clip.duration; // 시작 오프셋
     actions.set(idx, act);
   }
   mixers.set(idx, mx);
@@ -360,7 +368,7 @@ function removeFromAnim(idx) {
 function reselectionPass(init = false) {
   if (!objects[0]) return;
 
-  // 거리 오름차순
+  // 카메라와의 거리 오름차순
   const ids = [...Array(COUNT).keys()].sort((a, b) => {
     const pa = positions[a],
       pb = positions[b];
@@ -371,7 +379,7 @@ function reselectionPass(init = false) {
     return da - db;
   });
 
-  // 반경 내 우선
+  // 반경 내 우선 선정
   const desired = new Set();
   const r2 = ANIM_RADIUS * ANIM_RADIUS;
   for (const i of ids) {
@@ -379,16 +387,15 @@ function reselectionPass(init = false) {
     const d2 = (p.x - camera.position.x) ** 2 + (p.z - camera.position.z) ** 2;
     if (d2 <= r2) desired.add(i);
   }
-  // 부족하면 K-최근접 보강
+  // 부족하면 K-NN 보강
   for (
     let k = 0;
     desired.size < Math.min(MAX_ANIMATING, ids.length) && k < ids.length;
     k++
-  ) {
+  )
     desired.add(ids[k]);
-  }
 
-  // 경계 히스테리시스
+  // 히스테리시스
   const edge = [...desired][Math.min(desired.size - 1, MAX_ANIMATING - 1)];
   const edgeDist =
     edge !== undefined
@@ -406,7 +413,6 @@ function reselectionPass(init = false) {
     if (!keepByRadius && !keepByEdge && !desired.has(i)) removeFromAnim(i);
     else desired.add(i);
   }
-
   for (const i of desired) addToAnim(i);
 
   if (init) {
@@ -456,7 +462,7 @@ loader.load(GLB_PATH, (gltf) => {
 });
 
 // RD 텍스처
-texLoader.load("./assets/textures/RD.png", (tex) => {
+texLoader.load(RD_TEX_PATH, (tex) => {
   if (!USE_RD) return;
   const t = toPOTTexture(tex.image, 1024);
   rdMat = new THREE.MeshLambertMaterial({
@@ -465,7 +471,7 @@ texLoader.load("./assets/textures/RD.png", (tex) => {
     transparent: false,
     skinning: true,
   });
-  rdMat.map.repeat.set(8, 8);
+  rdMat.map.repeat.set(8, 8); // TODO: 내 텍스처 타일 스케일
   rdMat.map.needsUpdate = true;
   tryApplyRDToPending();
   syncInstancingRD();
@@ -490,7 +496,6 @@ const tmpM = new THREE.Matrix4(),
 let frameCounter = 0;
 const _camNow = new THREE.Vector3(),
   _camPrev = new THREE.Vector3().copy(camera.position);
-const MOVE_EPS = 0.25;
 
 function animate() {
   requestAnimationFrame(animate);
@@ -503,13 +508,12 @@ function animate() {
     reselectionPass();
     _camPrev.copy(_camNow);
   }
-
   if (frameCounter++ % RESELECT_EVERY === 0) reselectionPass();
 
   const dt = CLOCK.getDelta();
   const t = performance.now() * 0.001;
 
-  // 근거리 스킨드: 지터로 타임스케일 가변
+  // 근거리 스킨드: 타임스케일 지터
   animSet.forEach((idx) => {
     const mx = mixers.get(idx) || ensureMixer(idx);
     const act = actions.get(idx);
@@ -522,7 +526,7 @@ function animate() {
     mx.update(dt);
   });
 
-  // 원거리 인스턴스: 개별 주파수/진폭 + 느린 드리프트(모든 파트 동일 행렬)
+  // 원거리 인스턴스: 개별 주파수/진폭 + 느린 드리프트
   if (instBody && instLegBall && instLegStick) {
     let needs = false;
     idleSet.forEach((idx) => {
@@ -532,14 +536,12 @@ function animate() {
 
       root.matrix.decompose(tmpP, tmpQ, tmpS);
 
-      // 느린 드리프트로 파라미터를 시간에 따라 아주 조금씩 바꿈
       const drift =
         1.0 + jitterAmt[idx] * 0.5 * Math.sin(t * 0.1 + driftPhase[idx]);
-
       const ph = t * (wobbleW[idx] * drift) + phase[idx];
 
       const sy = 1.0 + Math.sin(ph) * (squashA[idx] * drift);
-      const sxz = 1.0 / Math.sqrt(sy);
+      const sxz = 1.0 / Math.sqrt(Math.max(0.0001, sy));
       const sx = sxz,
         sz = sxz;
 

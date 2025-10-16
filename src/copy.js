@@ -79,7 +79,7 @@ function updateFPS() {
     avg += (fps - avg) / samples;
     hud.innerHTML = `FPS: ${fps.toFixed(1)}<br>AVG: ${avg.toFixed(
       1
-    )}<br>Models: 20 (separate loads)`;
+    )}<br>Models: 100 (separate loads)`;
   }
 }
 

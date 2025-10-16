@@ -1,0 +1,190 @@
+{
+  "vertexCount": 150738,
+  "frameCount": 40,
+  "fps": 24,
+  "boundsMin": [
+    -1.6965237855911255,
+    -2.310119152069092,
+    -1.5248563289642334
+  ],
+  "boundsMax": [
+    1.289825677871704,
+    0.8921970129013062,
+    2.155550003051758
+  ],
+  "layout": {
+    "width": 8192,
+    "height": 737,
+    "pack": "row-major",
+    "rowWidth": 8192,
+    "origin": "top-left"
+  },
+  "flipV_hint": 0,
+  "parts": [
+    {
+      "name": "Body",
+      "vcount": 11634
+    },
+    {
+      "name": "LegBall",
+      "vcount": 5760
+    },
+    {
+      "name": "LegBall.001",
+      "vcount": 5760
+    },
+    {
+      "name": "LegBall.002",
+      "vcount": 5760
+    },
+    {
+      "name": "LegBall.003",
+      "vcount": 2880
+    },
+    {
+      "name": "LegBall.004",
+      "vcount": 2880
+    },
+    {
+      "name": "LegBall.005",
+      "vcount": 2880
+    },
+    {
+      "name": "LegBall.006",
+      "vcount": 2880
+    },
+    {
+      "name": "LegBall.007",
+      "vcount": 2880
+    },
+    {
+      "name": "LegBall.008",
+      "vcount": 2880
+    },
+    {
+      "name": "LegBall.009",
+      "vcount": 5760
+    },
+    {
+      "name": "LegBall.010",
+      "vcount": 2880
+    },
+    {
+      "name": "LegBall.011",
+      "vcount": 5760
+    },
+    {
+      "name": "LegBall.012",
+      "vcount": 5760
+    },
+    {
+      "name": "LegBall.013",
+      "vcount": 5760
+    },
+    {
+      "name": "LegBall.014",
+      "vcount": 5760
+    },
+    {
+      "name": "LegBall.015",
+      "vcount": 2880
+    },
+    {
+      "name": "LegBall.016",
+      "vcount": 2880
+    },
+    {
+      "name": "LegBall.017",
+      "vcount": 2880
+    },
+    {
+      "name": "leg_00_mesh",
+      "vcount": 2928
+    },
+    {
+      "name": "leg_01_mesh",
+      "vcount": 2928
+    },
+    {
+      "name": "leg_02_mesh",
+      "vcount": 2928
+    },
+    {
+      "name": "leg_03_mesh",
+      "vcount": 2928
+    },
+    {
+      "name": "leg_04_mesh",
+      "vcount": 2928
+    },
+    {
+      "name": "leg_05_mesh",
+      "vcount": 2928
+    },
+    {
+      "name": "leg_06_mesh",
+      "vcount": 2928
+    },
+    {
+      "name": "leg_07_mesh",
+      "vcount": 2928
+    },
+    {
+      "name": "leg_08_mesh",
+      "vcount": 2928
+    },
+    {
+      "name": "leg_09_mesh",
+      "vcount": 2928
+    },
+    {
+      "name": "leg_10_mesh",
+      "vcount": 2928
+    },
+    {
+      "name": "leg_11_mesh",
+      "vcount": 2928
+    },
+    {
+      "name": "leg_12_mesh",
+      "vcount": 2928
+    },
+    {
+      "name": "leg_13_mesh",
+      "vcount": 2928
+    },
+    {
+      "name": "leg_14_mesh",
+      "vcount": 2928
+    },
+    {
+      "name": "leg_15_mesh",
+      "vcount": 2928
+    },
+    {
+      "name": "leg_16_mesh",
+      "vcount": 2928
+    },
+    {
+      "name": "leg_17_mesh",
+      "vcount": 2928
+    },
+    {
+      "name": "orb_02",
+      "vcount": 2880
+    },
+    {
+      "name": "orb_04",
+      "vcount": 2880
+    },
+    {
+      "name": "orb_08",
+      "vcount": 2880
+    },
+    {
+      "name": "orb_11",
+      "vcount": 2880
+    }
+  ],
+  "notes": "Multi-part VAT baked on LOOP VERTICES; GLB must be read as NON-INDEXED."
+}

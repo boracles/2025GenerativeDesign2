@@ -31,6 +31,10 @@ const HYSTERESIS = 3.0; // 가장자리 히스테리시스
 const RESELECT_EVERY = 8; // 프레임마다 재선정 주기
 const MOVE_EPS = 0.25; // 카메라 이동 감지 임계
 
+const raycaster = new THREE.Raycaster();
+const plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0); // y=0 평면
+const _pt = new THREE.Vector3();
+
 // ──────────────────────────────────────────────
 // 기본 세팅
 const scene = new THREE.Scene();
@@ -497,6 +501,71 @@ let frameCounter = 0;
 const _camNow = new THREE.Vector3(),
   _camPrev = new THREE.Vector3().copy(camera.position);
 
+// ──────────────────────────────────────────────
+// 2️⃣ 교란장 (Disturbance Field) — 감정/에너지 필드 설정
+// ρ(x,z,t) = 시간에 따라 감쇠하는 스칼라 밀도장
+// 클릭, 타이머, 충돌 이벤트로 "에미터(emitter)"를 추가하여 감정 확산을 시뮬레이션한다.
+
+const emitters = []; // 활성화된 감정 에너지 소스(에미터) 목록
+
+const MAX_EMITTERS = 64; // 적당한 상한
+function addEmitter(x, z, intensity = 1.0, spread = 3.0, decay = 0.98) {
+  if (emitters.length >= MAX_EMITTERS) emitters.shift();
+  emitters.push({
+    x,
+    z,
+    intensity,
+    spread,
+    age: 0,
+    decay: THREE.MathUtils.clamp(decay, 0.9, 0.999),
+  });
+}
+
+// 감정 필드 업데이트
+function updateDisturbanceField(dt) {
+  for (let i = emitters.length - 1; i >= 0; i--) {
+    const e = emitters[i];
+    e.age += dt;
+    e.intensity *= e.decay; // 감쇠
+    if (e.intensity < 0.01) {
+      emitters.splice(i, 1); // 거의 사라지면 삭제
+    }
+  }
+}
+
+// 시각 테스트용 (나중에 보이드가 이 필드를 읽을 예정)
+function visualizeEmitters() {
+  emitters.forEach((e) => {
+    const color = new THREE.Color(0xff6699).multiplyScalar(e.intensity);
+    const s = e.spread * 0.2;
+    const geo = new THREE.SphereGeometry(s, 8, 8);
+    const mat = new THREE.MeshBasicMaterial({
+      color,
+      transparent: true,
+      opacity: 0.3,
+    });
+    const m = new THREE.Mesh(geo, mat);
+    m.position.set(e.x, 0.5, e.z);
+    scene.add(m);
+    setTimeout(() => scene.remove(m), 500); // 잠시 후 삭제
+  });
+}
+
+// 클릭 핸들러 교체:
+window.addEventListener("click", (ev) => {
+  const ndc = new THREE.Vector3(
+    (ev.clientX / innerWidth) * 2 - 1,
+    -(ev.clientY / innerHeight) * 2 + 1,
+    0.5
+  );
+  raycaster.setFromCamera(ndc, camera);
+  if (raycaster.ray.intersectPlane(plane, _pt)) {
+    addEmitter(_pt.x, _pt.z, 1.0, 3.0);
+    visualizeEmitters();
+    console.log("Emitter added:", _pt.x.toFixed(2), _pt.z.toFixed(2));
+  }
+});
+
 function animate() {
   requestAnimationFrame(animate);
   controls.update();
@@ -511,6 +580,7 @@ function animate() {
   if (frameCounter++ % RESELECT_EVERY === 0) reselectionPass();
 
   const dt = CLOCK.getDelta();
+  updateDisturbanceField(dt);
   const t = performance.now() * 0.001;
 
   // 근거리 스킨드: 타임스케일 지터

@@ -74,6 +74,33 @@ const VIEW_COS = Math.cos(THREE.MathUtils.degToRad(VIEW_DEG * 0.5));
 const FIELD_MIX_K = 0.25; // ρ→Sep감쇠로 맵핑 강도
 const SEP_MIN_SCALE = 0.28; // Sep 최저 35%까지만 줄이기
 
+// === Salinity/Brightness scalar field (간단한 절차적 장) ===
+const USE_SALINITY_FLOW = true;
+
+function saltField(x, z, t) {
+  // 저주파 fBm 느낌: 천천히 바뀌는 공간 그라디언트
+  const a = 0.06,
+    b = 0.045,
+    w = 0.08;
+  return (
+    (Math.sin(a * x + 0.5 * Math.sin(w * t)) +
+      Math.cos(b * z + 0.3 * Math.cos(w * t + 1.7))) *
+      0.5 +
+    0.5
+  ); // [0,1]
+}
+
+function saltGrad(x, z, t, eps = 0.75) {
+  const dpx = saltField(x + eps, z, t);
+  const dnx = saltField(x - eps, z, t);
+  const dpz = saltField(x, z + eps, t);
+  const dnz = saltField(x, z - eps, t);
+  const gx = (dpx - dnx) / (2 * eps);
+  const gz = (dpz - dnz) / (2 * eps);
+  const g = new THREE.Vector2(gx, gz);
+  return g.lengthSq() > 1e-6 ? g.normalize() : g.set(0, 0);
+}
+
 // 거리별 완만한 가중 램프
 function smooth01(x) {
   return THREE.MathUtils.clamp(x, 0, 1);
@@ -498,9 +525,9 @@ function updateBoids(dt, tSec) {
   // 1) 의사결정: 감지값 → 조향력(steer)
   for (let i = 0; i < COUNT; i++) {
     const s = sense(i, tSec);
-    const pi = positions[i];
 
-    let sep = new THREE.Vector2(0, 0);
+    const pi = positions[i]; // ← 먼저 선언
+    let sep = new THREE.Vector2(0, 0); // ← 먼저 선언
     let coh = new THREE.Vector2(0, 0);
     let ali = new THREE.Vector2(0, 0);
     let cohN = 0,
@@ -563,6 +590,22 @@ function updateBoids(dt, tSec) {
     // [3-A] 정지일수록 응집/정렬을 자동 감쇠
     coh.multiplyScalar(1.0 - slow);
     ali.multiplyScalar(1.0 - slow);
+
+    // --- Edge-first dissolve bias (정위치) ---
+    {
+      const hasGrad = s.grad.x !== 0 || s.grad.y !== 0;
+      const centerGuess = new THREE.Vector2(
+        hasGrad ? pi.x - s.grad.x : 0,
+        hasGrad ? pi.z - s.grad.y : 0
+      );
+      const toC = new THREE.Vector2(pi.x - centerGuess.x, pi.z - centerGuess.y);
+      const r = toC.length();
+      const rN = THREE.MathUtils.smoothstep(r, 0.0, NEIGHBOR_R * 2.5);
+      const fade = (1.0 - THREE.MathUtils.clamp(s.rho, 0, 1)) * rN;
+      const edgeDissolve = THREE.MathUtils.lerp(1.0, 0.4, fade); // 최대 60% 감쇠
+      coh.multiplyScalar(edgeDissolve);
+      ali.multiplyScalar(edgeDissolve);
+    }
 
     // 외부 자극/소용돌이/전역 흐름
     const pull = s.grad.clone().multiplyScalar(-PULL_GAIN); // -∇ρ × gain
@@ -1035,16 +1078,15 @@ function sense(i, tSec) {
   const grad = densityGrad(pi.x, pi.z); // 밀도 증가 방향
 
   // ── 3) 전체 흐름 감지
-  const flow = envFlow(tSec); // 단위 벡터
+  let flow = envFlow(tSec); // 기존 전역 흐름
+  if (USE_SALINITY_FLOW) {
+    const g = saltGrad(pi.x, pi.z, tSec); // 밝기/염분 그라디언트
+    // "밝은/짠 쪽으로 머리가 기울어" → 그라디언트 방향을 살짝 더 우선
+    flow = g.multiplyScalar(0.7).add(flow.multiplyScalar(0.3));
+    if (flow.lengthSq() > 1e-6) flow.normalize();
+  }
 
-  return {
-    nbrCount: cnt,
-    nbrCenter: center,
-    nbrVel: avgVel,
-    rho,
-    grad,
-    flow,
-  };
+  return { nbrCount: cnt, nbrCenter: center, nbrVel: avgVel, rho, grad, flow };
 }
 
 function wallForce(pi) {

@@ -39,7 +39,7 @@ const DEBUG_SENSE = true; // 감지 시각화 ON/OFF
 const SENSE_SAMPLE = 12; // 화살표를 그릴 샘플 개체 수(과부하 방지)
 
 // 규칙 가중치
-const W_SEP = 2.0; // Separation (떨어짐)
+const W_SEP = 1.6; // Separation (떨어짐)
 const W_COH = 0.7; // Cohesion (가까워짐)
 const W_ALI = 0.6; // Alignment (방향 정렬)
 const W_PULL = 1.0; // External Pull (외부 자극)
@@ -487,8 +487,9 @@ function updateSenseArrows(tSec) {
     const base = new THREE.Vector3(p.x, 0.05, p.z);
 
     // -∇ρ (끌림) — 충분히 클 때만 표시
-    const gx = -s.grad.x,
-      gz = -s.grad.y;
+    const gx = s.grad.x,
+      gz = s.grad.y;
+
     const gLen = Math.hypot(gx, gz);
     if (gLen > GRAD_EPS) {
       const dir = new THREE.Vector3(gx / gLen, 0, gz / gLen);
@@ -608,7 +609,7 @@ function updateBoids(dt, tSec) {
     }
 
     // 외부 자극/소용돌이/전역 흐름
-    const pull = s.grad.clone().multiplyScalar(-PULL_GAIN); // -∇ρ × gain
+    const pull = s.grad.clone().multiplyScalar(PULL_GAIN); // +∇ρ × gain  ← 에미터로 끌림
 
     const vortex =
       s.rho > VORTEX_THRESHOLD
@@ -886,7 +887,6 @@ function reselectionPass(init = false) {
   }
 }
 
-// ──────────────────────────────────────────────
 // GLB 로드 & 배치
 loader.load(GLB_PATH, (gltf) => {
   const baseScene = gltf.scene;
@@ -939,7 +939,6 @@ texLoader.load(RD_TEX_PATH, (tex) => {
   syncInstancingRD();
 });
 
-// ──────────────────────────────────────────────
 // 리사이즈
 addEventListener("resize", () => {
   camera.aspect = innerWidth / innerHeight;
@@ -947,7 +946,6 @@ addEventListener("resize", () => {
   renderer.setSize(innerWidth, innerHeight);
 });
 
-// ──────────────────────────────────────────────
 // 노이즈 변형(인스턴스용) + 스킨드 타임스케일 지터
 const tmpM = new THREE.Matrix4(),
   tmpS = new THREE.Vector3(),
@@ -959,7 +957,6 @@ let frameCounter = 0;
 const _camNow = new THREE.Vector3(),
   _camPrev = new THREE.Vector3().copy(camera.position);
 
-// ──────────────────────────────────────────────
 // 2️⃣ 교란장 (Disturbance Field) — 감정/에너지 필드 설정
 // ρ(x,z,t) = 시간에 따라 감쇠하는 스칼라 밀도장
 // 클릭, 타이머, 충돌 이벤트로 "에미터(emitter)"를 추가하여 감정 확산을 시뮬레이션한다.
@@ -1180,6 +1177,15 @@ function animate() {
       const finalQ = tmpQ.clone().multiply(bendQ);
       const finalS = new THREE.Vector3(sx, sy, sz);
       const finalP = new THREE.Vector3(tmpP.x, tmpP.y + py, tmpP.z);
+
+      // ρ(파티클 밀도)에 따라 살짝 '뻗는' 느낌을 부여
+      const rhoHere = densityAt(finalP.x, finalP.z);
+      const reach = THREE.MathUtils.lerp(
+        1.0,
+        1.15,
+        Math.min(1, rhoHere * 0.25)
+      );
+      finalS.multiplyScalar(reach);
 
       tmpM.compose(finalP, finalQ, finalS);
       instBody.setMatrixAt(idx, tmpM);

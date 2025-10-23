@@ -54,6 +54,28 @@ float fbm(vec2 p) {
   return v;
 }
 
+// ───── Voronoi helper (global) ─────
+vec3 voro(vec2 p) {
+  vec2 i = floor(p);
+  vec2 f = fract(p);
+  float md = 1e9;
+  vec2 id = vec2(0.0);
+  for(int y = -1; y <= 1; y++) {
+    for(int x = -1; x <= 1; x++) {
+      vec2 g = i + vec2(x, y);
+      vec2 r = vec2(hash(g + 13.1), hash(g + 91.7)) - 0.5;
+      vec2 c = g + r;
+      vec2 d = (i + f) - c;
+      float dist = dot(d, d);
+      if(dist < md) {
+        md = dist;
+        id = g;
+      }
+    }
+  }
+  return vec3(id, sqrt(md)); // xy: cell id, z: distance to border
+}
+
 float idxAt(vec2 q) {
   vec2 w1q = vec2(fbm(q * 1.8 + seed * 0.11), fbm(q * 1.8 - seed * 0.28));
   vec2 w2q = vec2(fbm(q * 3.6 - seed * 0.47), fbm(q * 3.6 + seed * 0.62));
@@ -70,10 +92,10 @@ float idxAt(vec2 q) {
   fq = mix(fq, fq + 0.04 * (texture2D(rdTex, q).g - 0.5), ridgeGain);
   float Nq = float(bands);
   float idx0 = floor(fq * Nq);
-  vec2 cellq = floor(pq * 12.0);
-  float rq = hash(cellq + seed * 3.7);
-  float offq = (rq < 0.17) ? 1.0 : ((rq > 0.83) ? -1.0 : 0.0);
-  offq += floor(mix(-0.45, 0.45, fbm(pq * 2.4 + seed * 1.9)) + 0.5);
+  vec3 vcellq = voro(pq * 12.0);
+  float rq = hash(vcellq.xy + seed * 3.7);
+  float offq = 0.35 * (fbm(pq * 0.9 + seed * 2.1) - 0.5) + 0.15 * (rq - 0.5);
+  offq = clamp(offq, -0.45, 0.45);
   return clamp(idx0 + offq, 0.0, Nq - 1.0);
 }
 
@@ -119,12 +141,14 @@ void terracing(vec2 uv, out float h, out float hBase, out float rim, out vec3 co
   float frac = fract(raw);
   float f = fract(field * Nmaj);
 
-  float smoothIdx = idx0 + smoothstep(0.2, 0.8, frac);
+  float w = clamp(fwidth(raw) * 0.5, 0.002, 0.15); // 해상도 기반 에지 폭
+  float smoothIdx = idx0 + smoothstep(0.5 - w, 0.5 + w, frac);
 
-  vec2 cell = floor(p * 12.0);
-  float r = hash(cell + seed * 3.7);
-  float off = (r < 0.17) ? 1.0 : ((r > 0.83) ? -1.0 : 0.0);
-  off += floor(mix(-0.45, 0.45, fbm(p * 2.4 + seed * 1.9)) + 0.5);
+  vec3 vcell = voro(p * 12.0);
+  float r = hash(vcell.xy + seed * 3.7);          // 0..1
+ // 연속 오프셋: 작은 범위에서만 미세 이동 (칸깨짐 방지)
+  float off = 0.35 * (fbm(p * 0.9 + seed * 2.1) - 0.5) + 0.15 * (r - 0.5);
+  off = clamp(off, -0.45, 0.45);
 
   float idx = clamp(smoothIdx + off, 0.0, Nmaj - 1.0);
 
@@ -135,12 +159,8 @@ void terracing(vec2 uv, out float h, out float hBase, out float rim, out vec3 co
   float aa = max(fwidth(uv.x) + fwidth(uv.y), 1e-5);
   float rimW = mix(0.045, 0.12, clamp((rimWidth - 0.02) / (0.18 - 0.02), 0.0, 1.0));
   float rimWpx = max(rimW, 2.0 * aa);
-  float idxC = idxAt(uv);
-  float hasLower = 0.0, hasHigher = 0.0;
-            #define ACC(off) hasLower+=step(0.5, idxC - idxAt(uv+(off))); hasHigher+=step(0.5, idxAt(uv+(off)) - idxC);
-  ACC(vec2(texel.x, 0.0)) ACC(vec2(-texel.x, 0.0)) ACC(vec2(0.0, texel.y)) ACC(vec2(0.0, -texel.y)) ACC(vec2(texel.x, texel.y)) ACC(vec2(texel.x, -texel.y)) ACC(vec2(-texel.x, texel.y)) ACC(vec2(-texel.x, -texel.y)) hasLower = clamp(hasLower, 0.0, 1.0);
-  hasHigher = clamp(hasHigher, 0.0, 1.0);
-  float rimMask = clamp(hasLower + 0.5 * hasHigher, 0.0, 1.0);
+
+  float rimMask = 1.0; // 연속값 기반 에지로만 처리
 
   float dC = topDistAt(uv, Nmaj);
   float dR = topDistAt(uv + vec2(texel.x, 0.0), Nmaj);
@@ -150,6 +170,8 @@ void terracing(vec2 uv, out float h, out float hBase, out float rim, out vec3 co
   float dMin = min(min(dC, dR), min(dL, min(dU, dD)));
   float dAvg = (dC + dR + dL + dU + dD) * 0.2;
   float dEdge = min(dMin, dAvg);
+  float useV = smoothstep(0.10, 0.03, dMin); // 경계 가까울수록 1
+  dEdge = mix(dEdge, min(dEdge, vcell.z), useV);
 
   float core = 1.0 - smoothstep(rimWpx - aa, rimWpx + aa * 3.0, dEdge);
   float sigma = rimWpx * bulgeWidth;

@@ -1359,7 +1359,7 @@ function bake(dt) {
   renderer.setRenderTarget(null);
 
   renderer.setRenderTarget(null);
-  terrainMat.displacementMap = heightRT.texture;
+  terrainMat.displacementMap = heightDispRT.texture; // ★ 블러 높이 유지
   applyBaseView();
 }
 
@@ -1371,7 +1371,7 @@ terrainGeo.rotateX(-Math.PI / 2);
 
 const terrainMat = new THREE.MeshStandardMaterial({
   map: colorRT.texture,
-  displacementMap: heightRT.texture,
+  displacementMap: heightDispRT.texture, // ★ 블러 높이 사용
   displacementScale: 0.0,
   roughness: 1.0,
   metalness: 0.0,

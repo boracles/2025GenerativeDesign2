@@ -39,7 +39,7 @@ const camera = new THREE.PerspectiveCamera(
 camera.position.set(3.2, 2.2, 3.2);
 
 const rt = new THREE.WebGLRenderTarget(innerWidth, innerHeight, {
-  samples: renderer.capabilities.isWebGL2 ? 4 : 0,
+  samples: 0,
 });
 const composer = new EffectComposer(renderer, rt);
 composer.addPass(new RenderPass(scene, camera));

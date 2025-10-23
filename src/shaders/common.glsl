@@ -197,16 +197,11 @@ void terracing(vec2 uv, out float h, out float hBase, out float rim, out vec3 co
 
   float rimMask = 1.0; // 연속값 기반 에지로만 처리
 
-  float dC = topDistAt(uv, Nmaj);
-  float dR = topDistAt(uv + vec2(texel.x, 0.0), Nmaj);
-  float dL = topDistAt(uv + vec2(-texel.x, 0.0), Nmaj);
-  float dU = topDistAt(uv + vec2(0.0, texel.y), Nmaj);
-  float dD = topDistAt(uv + vec2(0.0, -texel.y), Nmaj);
-  float dMin = min(min(dC, dR), min(dL, min(dU, dD)));
-  float dAvg = (dC + dR + dL + dU + dD) * 0.2;
-  float dEdge = min(dMin, dAvg);
-  float useV = smoothstep(0.10, 0.03, dMin); // 경계 가까울수록 1
-  dEdge = mix(dEdge, min(dEdge, vcell.z), useV);
+   // 밴드 경계까지의 '연속 거리'를 화면미분으로 계산
+  // raw = field * Nmaj (이미 위에서 계산됨)
+  float fstep = abs(fract(raw) - 0.5);                         // 0..0.5 (계단 중앙선과의 값 차이)
+  float gradRaw = length(vec2(dFdx(raw), dFdy(raw))) + 1e-6;     // 화면 공간에서의 기울기 크기
+  float dEdge = fstep / gradRaw;                               // 화면거리 근사 (등방성)
 
   float core = 1.0 - smoothstep(rimWpx - aa, rimWpx + aa * 3.0, dEdge);
   float sigma = rimWpx * bulgeWidth;
@@ -241,7 +236,7 @@ void terracing(vec2 uv, out float h, out float hBase, out float rim, out vec3 co
   float hRim = g * rimAtten * (terrAmp * rimHeightScale * (rimGain * stepH) * rimProfile);
   float hTmp = clamp(g * (0.10 * hBase) + hBevel + hRim, 0.0, 1.0);
 
-  float topMaskH = smoothstep(0.15, 0.35, dMin);
+  float topMaskH = smoothstep(0.02, 0.15, dEdge);
   float tb = fbm(uv * bumpScale);
   h = clamp(hTmp + topMaskH * bumpAmp * (tb - 0.5), 0.0, 1.0);
 

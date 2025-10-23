@@ -187,7 +187,7 @@ const params = {
   cellJitter: 0.6,
   rimMicro: 5.0,
   growSpeed: 0.4,
-  disp: 1.6,
+  disp: 1.8,
   stepContrast: 0.2,
   stepVar: 0.45,
   minStep: 0.028,

@@ -128,6 +128,10 @@ void terracing(vec2 uv, out float h, out float hBase, out float rim, out vec3 co
   float rid = abs(2.0 * fbm(p * macroFreq2 * 0.85) - 1.0);
   float field = 0.55 * f0 + 0.25 * f1 + 0.20 * rid;
 
+  // 곡선형 경계 유도: field에 미세 워프
+  vec2 warpN = vec2(fbm(p * 5.0 + seed * 0.35) - 0.5, fbm(p * 5.0 - seed * 0.72) - 0.5);
+  field += 0.05 * (warpN.x + warpN.y);
+
  // --- irregular multi-basin bowl (non-circular)
   vec2 c = vec2(0.5) + 0.030 * vec2(fbm(vec2(seed * 0.13, 0.0) + uv * 0.7) - 0.5, fbm(vec2(0.0, seed * 0.19) + uv * 0.7) - 0.5);
 
@@ -197,11 +201,11 @@ void terracing(vec2 uv, out float h, out float hBase, out float rim, out vec3 co
 
   float rimMask = 1.0; // 연속값 기반 에지로만 처리
 
-   // 밴드 경계까지의 '연속 거리'를 화면미분으로 계산
-  // raw = field * Nmaj (이미 위에서 계산됨)
-  float fstep = abs(fract(raw) - 0.5);                         // 0..0.5 (계단 중앙선과의 값 차이)
-  float gradRaw = length(vec2(dFdx(raw), dFdy(raw))) + 1e-6;     // 화면 공간에서의 기울기 크기
-  float dEdge = fstep / gradRaw;                               // 화면거리 근사 (등방성)
+   // 밴드 경계까지의 거리(곡선형): FBM 워프 + smoothstep
+  float bandPhase = fract(raw);                          // 0..1
+  float baseEdge = min(bandPhase, 1.0 - bandPhase);     // 경계까지 값거리
+  float warpEdge = 0.05 * (fbm(p * 4.0 + seed * 0.7) - 0.5) + 0.03 * (fbm(p * 8.0 - seed * 1.9) - 0.5); // 곡률 왜곡
+  float dEdge = smoothstep(0.02, 0.25, abs(baseEdge + warpEdge));
 
   float core = 1.0 - smoothstep(rimWpx - aa, rimWpx + aa * 3.0, dEdge);
   float sigma = rimWpx * bulgeWidth;

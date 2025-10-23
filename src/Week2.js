@@ -9,6 +9,10 @@ import { FXAAShader } from "three/addons/shaders/FXAAShader.js";
 import { SMAAPass } from "three/addons/postprocessing/SMAAPass.js";
 import { LOD } from "three";
 
+import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
+import { clone as cloneSkinned } from "three/addons/utils/SkeletonUtils.js";
+import * as BufferGeometryUtils from "three/addons/utils/BufferGeometryUtils.js";
+
 const renderer = new THREE.WebGLRenderer({
   antialias: true,
   powerPreference: "high-performance",

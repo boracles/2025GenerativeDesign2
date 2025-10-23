@@ -1364,7 +1364,8 @@ function bake(dt) {
 }
 
 /* ─ Terrain ─ */
-const DIV = 1024;
+const DIV = 2048;
+
 const terrainGeo = new THREE.PlaneGeometry(SIZE, SIZE, DIV, DIV);
 terrainGeo.rotateX(-Math.PI / 2);
 
@@ -1388,9 +1389,9 @@ function makeMesh(div) {
   g.rotateX(-Math.PI / 2);
   return new THREE.Mesh(g, terrainMat);
 }
-lod.addLevel(makeMesh(1024), 0);
-lod.addLevel(makeMesh(512), 12);
-lod.addLevel(makeMesh(256), 24);
+lod.addLevel(makeMesh(2048), 0);
+lod.addLevel(makeMesh(1024), 12);
+lod.addLevel(makeMesh(512), 24);
 scene.add(lod);
 
 // 레이캐스트 등에서 사용할 공용 참조

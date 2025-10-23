@@ -127,8 +127,41 @@ void terracing(vec2 uv, out float h, out float hBase, out float rim, out vec3 co
   float f1 = fbm(p * macroFreq2 * 1.7);
   float rid = abs(2.0 * fbm(p * macroFreq2 * 0.85) - 1.0);
   float field = 0.55 * f0 + 0.25 * f1 + 0.20 * rid;
-  float ramp = 0.65 * (uv.y - 0.5) + 0.25 * (uv.x - 0.5);
-  field = mix(field, clamp(ramp + 0.5, 0.0, 1.0), 0.28);
+
+ // --- irregular multi-basin bowl (non-circular)
+  vec2 c = vec2(0.5) + 0.030 * vec2(fbm(vec2(seed * 0.13, 0.0) + uv * 0.7) - 0.5, fbm(vec2(0.0, seed * 0.19) + uv * 0.7) - 0.5);
+
+// 1) 각도 기반 반경 프로파일 (원형 깨기)
+  vec2 q = uv - c;
+  float r = length(q);
+  float th = atan(q.y, q.x);
+
+// θ에 의존하는 변조(저·중·고주파 + FBM)
+  float rBase = 0.62;
+  float rVar = 0.10 * sin(th * 3.0 + seed * 0.7) +
+    0.06 * sin(th * 7.0 - seed * 1.3) +
+    0.06 * (fbm(vec2(cos(th), sin(th)) * 2.3 + seed * 0.21) - 0.5);
+
+// 반경 목표값
+  float rTarget = rBase + rVar;
+
+// 2) 반경에 추가 워프(라디얼 노이즈)로 울퉁불퉁
+  float warpR = 0.10 * (fbm(uv * 2.0 + seed * 0.31) - 0.5);
+
+// 첫 번째 분지
+  float bowl1 = smoothstep(rTarget - 0.12, rTarget + 0.14, r + warpR);
+
+// 3) 보조 중심(두 번째 분지) 추가 → 한쪽이 패이거나 늘어진 느낌
+  vec2 c2 = c + 0.18 * vec2(fbm(uv * 1.1 + seed * 3.1) - 0.5, fbm(uv * 1.1 - seed * 2.7) - 0.5);
+  float r2 = length(uv - c2);
+  float bowl2 = smoothstep(rTarget - 0.10, rTarget + 0.16, r2 + warpR * 0.7);
+
+// 분지들을 합성: 가장 낮은 쪽을 채택(비원형, 군데군데 파임)
+  float bowl = min(bowl1, bowl2);
+
+// 원래 field와 섞기 — 과하면 동그랗게 보이므로 0.18~0.24 권장
+  field = mix(field, bowl, 0.22);
+
   field = clamp((field - 0.03) / (0.97 - 0.03), 0.0, 1.0);
   float gammaMap = mix(0.75, 1.45, fbm(p * 1.1 + seed * 0.24));
   field = pow(field, gammaMap);
@@ -142,13 +175,14 @@ void terracing(vec2 uv, out float h, out float hBase, out float rim, out vec3 co
   float frac = fract(raw);
   float f = fract(field * Nmaj);
 
-  float w = clamp(fwidth(raw) * 0.5, 0.002, 0.15); // 해상도 기반 에지 폭
-  float smoothIdx = idx0 + smoothstep(0.5 - w, 0.5 + w, frac);
+ // 수정
+  float fw = clamp(fwidth(raw) * 0.5, 0.002, 0.15);
+  float smoothIdx = idx0 + smoothstep(0.5 - fw, 0.5 + fw, frac);
 
   vec3 vcell = voro(p * 12.0);
-  float r = hash(vcell.xy + seed * 3.7);          // 0..1
- // 연속 오프셋: 작은 범위에서만 미세 이동 (칸깨짐 방지)
-  float off = 0.35 * (fbm(p * 0.9 + seed * 2.1) - 0.5) + 0.15 * (r - 0.5);
+  float rHash = hash(vcell.xy + seed * 3.7);      // 이름 변경!
+  float off = 0.35 * (fbm(p * 0.9 + seed * 2.1) - 0.5) + 0.15 * (rHash - 0.5);
+
   off = clamp(off, -0.45, 0.45);
 
   float idx = clamp(smoothIdx + off, 0.0, Nmaj - 1.0);
@@ -180,8 +214,15 @@ void terracing(vec2 uv, out float h, out float hBase, out float rim, out vec3 co
   core *= gRim * rimMask;
   bulge *= gRim * rimMask;
 
+ // --- 단마다 높이 랜덤하게 변형 ---
   float stepH = 1.0 / Nmaj;
-  float plate = (idx + 1.0) / Nmaj;
+
+// 밴드 인덱스별 변조값 (FBM으로)
+  float bandNoise = fbm(vec2(idx * 0.37 + seed * 1.7, seed * 2.3)) * 0.6 + 0.7;
+// 0.7~1.3 배 정도로 단마다 높이 차이
+
+  float plate = (idx + bandNoise) / Nmaj;
+
   float base0 = (idx < 0.5) ? (0.35 * stepH) : 0.0;
   float hPlate = g * (plate + base0);
 

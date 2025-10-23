@@ -172,7 +172,7 @@ export async function initBoidsSystem({
   const acc = Array.from({ length: COUNT }, () => new THREE.Vector3());
 
   // [Sense] 감지 반경 파라미터
-  const NEIGHBOR_R = 4.0; // 이웃으로 인식하는 반경
+  const NEIGHBOR_R = 0.7; // 이웃으로 인식하는 반경
   const NEIGHBOR_R2 = NEIGHBOR_R * NEIGHBOR_R;
 
   (function initLayout() {

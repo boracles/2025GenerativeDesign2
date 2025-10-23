@@ -989,34 +989,27 @@ function bake(dt) {
   renderer.render(fsScene, fsCam);
   renderer.setRenderTarget(null);
 
+  // --- maskRT -> scatterRT -> emissiveMap 연결 ---
+  scatterMat.uniforms.uSea.value = params.seaLevel; // 파라미터 동기화
+
+  fsQuad.material = scatterMat;
+  renderer.setRenderTarget(scatterRT);
+  renderer.render(fsScene, fsCam);
+  renderer.setRenderTarget(null);
+
+  if (showScatter) {
+    terrainMat.emissive.set(0xffffff);
+    if (terrainMat.emissiveIntensity < 0.8) terrainMat.emissiveIntensity = 1.0;
+    terrainMat.emissiveMap = scatterRT.texture; // 점만 발광
+    terrainMat.needsUpdate = true;
+  } else {
+    terrainMat.emissiveMap = null;
+  }
+
   renderer.setRenderTarget(null);
   terrainMat.displacementMap = heightRT.texture;
   applyBaseView();
 }
-
-(function attachScatterAfterMaskBake() {
-  if (typeof bake === "function") {
-    const _bake = bake;
-    bake = function (...args) {
-      _bake.apply(this, args); // 기존 bake 실행
-
-      // === 여기부터 추가: maskRT → scatterRT ===
-      fsQuad.material = scatterMat;
-      renderer.setRenderTarget(scatterRT);
-      renderer.render(fsScene, fsCam);
-      renderer.setRenderTarget(null);
-
-      if (showScatter) {
-        terrainMat.emissive.set(0xffffff);
-        terrainMat.emissiveIntensity = 1.0; // 필요시 GUI로 노출
-        terrainMat.emissiveMap = scatterRT.texture; // 검정은 비발광, 점 RGB만 발광
-        terrainMat.needsUpdate = true;
-      } else {
-        terrainMat.emissiveMap = null;
-      }
-    };
-  }
-})();
 
 /* ─ Terrain ─ */
 const DIV = 512;

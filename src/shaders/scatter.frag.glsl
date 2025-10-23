@@ -8,64 +8,172 @@ uniform sampler2D tMask;
 uniform vec2 texel;
 uniform float uSea;
 
-// Plant (salt-tolerant vegetation)
-uniform float tH_lo;   // H < sea + tH_lo
-uniform float tS_lo;   // S < tS_lo
-uniform float tC_lo;   // C < tC_lo
+// 기존 임계값들 …
+uniform float tH_lo, tS_lo, tC_lo;
+uniform float tH_bandLo, tH_bandHi, tS_midLo, tS_midHi, tC_hi;
+uniform float aSouth, aWidth;
+uniform float stride, rDot;
 
-// Crab (salt crab)
-uniform float tH_bandLo; // sea + tH_bandLo <= H
-uniform float tH_bandHi; // H <= sea + tH_bandHi
-uniform float tS_midLo;  // tS_midLo <= S
-uniform float tS_midHi;  // S <= tS_midHi
-uniform float tC_hi;     // C > tC_hi
+// ★ 블루노이즈 우승자 방식 유니폼
+uniform float uRpx;   // 픽셀 단위 최소 간격
+uniform float uSeed;  // 우승자 섞기용 시드
 
-// Aspect
-uniform float aSouth; // center (0..1) — 남향은 0.25
-uniform float aWidth; // 허용 반폭 (0..1), 0.1~0.2 권장
+// ---- 앵커 [A]: Noise Filtering uniforms ----
+uniform bool uUseNoise;      // [true|false]
+uniform float uNoiseScale;    // [기본 1.0]  0.05~8.0
+uniform float uNoiseAmp;      // [기본 0.5]  0.0~2.0
+uniform float uNoiseBias;     // [기본 0.0]  -1.0~1.0
+uniform float uNoiseSeed;     // [기본 랜덤], reseed로 갱신
 
-// dots
-uniform float stride; // 픽셀 격자 간격
-uniform float rDot;   // 셀 내부 반지름 (0..0.5)
+// 해시
+float hash12(vec2 p) {
+  p = fract(p * vec2(127.1, 311.7));
+  p += dot(p, p + 34.0);
+  return fract(p.x * p.y);
+}
 
+// Aspect 매칭
 float aspectMatch(float a, float center, float width) {
   float d = abs(a - center);
-  d = min(d, 1.0 - d);         // 원형 거리
-  return smoothstep(0.0, width, width - d); // center 근처일수록 1
+  d = min(d, 1.0 - d);
+  float t = 1.0 - clamp(d / max(1e-6, width), 0.0, 1.0);
+  return t * t * (3.0 - 2.0 * t);
+}
+
+// 후보(규칙 통과) 판정
+bool eligible(vec2 uv) {
+  vec4 m = texture2D(tMask, uv);
+  float H = m.r, S = m.g, C = m.b, A = m.a;
+  float aM = aspectMatch(A, aSouth, aWidth);
+
+  bool plant = (H < uSea + tH_lo) && (S < tS_lo) && (C < tC_lo) && (aM > 0.5);
+  bool crab = (uSea + tH_bandLo <= H && H <= uSea + tH_bandHi) &&
+    (tS_midLo <= S && S <= tS_midHi) &&
+    (C > tC_hi) && (aM > 0.5);
+  return plant || crab;
+}
+
+// ---- 앵커 [B]: Noise 함수 정의 ----
+float hash21(vec2 p) {
+  p = fract(p * vec2(443.8975, 441.423));
+  p += dot(p, p + 19.19);
+  return fract(p.x * p.y);
+}
+
+float valueNoise(vec2 p) {
+  vec2 i = floor(p);
+  vec2 f = fract(p);
+  float a = hash21(i);
+  float b = hash21(i + vec2(1.0, 0.0));
+  float c = hash21(i + vec2(0.0, 1.0));
+  float d = hash21(i + vec2(1.0, 1.0));
+  vec2 u = f * f * (3.0 - 2.0 * f);
+  return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
+}
+
+float fbm(vec2 p) {
+  float v = 0.0;
+  float a = 0.5;
+  for(int i = 0; i < 5; i++) {
+    v += a * valueNoise(p);
+    p *= 2.0;
+    a *= 0.5;
+  }
+  return clamp(v, 0.0, 1.0);
 }
 
 void main() {
-  // 셀 중심 샘플링
+  // 셀 좌표/중심
   vec2 p = gl_FragCoord.xy / stride;
   vec2 cell = floor(p) + 0.5;
   vec2 uv = cell * stride * texel;
 
-  // 마스크 읽기
-  vec4 m = texture2D(tMask, uv);
-  float H = m.r, S = m.g, C = m.b, A = m.a;
+  // 후보가 아니면 즉시 투명
+  if(!eligible(uv))
+    discard;
 
-  // 규칙
-  bool plantOn = (H < uSea + tH_lo) &&
-    (S < tS_lo) &&
-    (C < tC_lo) &&
-    (aspectMatch(A, aSouth, aWidth) > 0.5);
+  // 내 우선순위(블루노이즈 우승자)
+  float myPriority = hash12(cell + uSeed);
 
-  bool crabOn = (uSea + tH_bandLo <= H && H <= uSea + tH_bandHi) &&
-    (tS_midLo <= S && S <= tS_midHi) &&
-    (C > tC_hi) &&
-    (aspectMatch(A, aSouth, aWidth) > 0.5);
+  // 반경 rpx를 셀 단위로 환산
+  float rCells = uRpx / stride;
+  int R = int(ceil(rCells));
+  const int MAX_R = 16; // 루프 상한
 
-  // 셀 내부 원형 점 마스크
+  // 주변 셀 검사
+  for(int jy = -MAX_R; jy <= MAX_R; ++jy) {
+    for(int ix = -MAX_R; ix <= MAX_R; ++ix) {
+      if(ix == 0 && jy == 0)
+        continue;
+      if(abs(ix) > R || abs(jy) > R)
+        continue;
+
+      vec2 cellN = cell + vec2(float(ix), float(jy));
+      vec2 uvN = cellN * stride * texel;
+
+      // 반경 체크(픽셀)
+      vec2 dpx = vec2(float(ix), float(jy)) * stride;
+      if(dot(dpx, dpx) > uRpx * uRpx)
+        continue;
+
+      if(!eligible(uvN))
+        continue;
+
+      float pr = hash12(cellN + uSeed);
+      if(pr > myPriority)
+        discard; // 이웃이 우승 → 탈락
+    }
+  }
+
+  // 우승 셀 → 점 그리기(원형)
   vec2 q = fract(p) - 0.5;
   float dotMask = step(length(q), rDot);
 
-  // 색상/알파
+  // 색 계산 (식물/게)
+  vec4 m = texture2D(tMask, uv);
+  float H = m.r, S = m.g, C = m.b, A = m.a;
+  float aM = aspectMatch(A, aSouth, aWidth);
+  bool plant = (H < uSea + tH_lo) && (S < tS_lo) && (C < tC_lo) && (aM > 0.5);
+  bool crab = (uSea + tH_bandLo <= H && H <= uSea + tH_bandHi) &&
+    (tS_midLo <= S && S <= tS_midHi) &&
+    (C > tC_hi) && (aM > 0.5);
+
   vec3 colPlant = vec3(0.95, 0.78, 0.38);
   vec3 colCrab = vec3(0.69, 0.34, 0.35);
-  float fp = plantOn ? 1.0 : 0.0;
-  float fc = crabOn ? 1.0 : 0.0;
-  vec3 col = fp * colPlant + fc * colCrab;
-  float vis = clamp(fp + fc, 0.0, 1.0) * dotMask;
+  vec3 col = (plant ? colPlant : vec3(0.0)) + (crab ? colCrab : vec3(0.0));
 
-  gl_FragColor = vec4(col, vis); // 투명도 기반 오버레이 가능
+  float vis = dotMask; // 기본 가시도
+
+  // ---- 앵커 [C]: Noise Filtering 적용 (vis 수정) ----
+  // PATCH for scatter.frag.glsl — make Noise visibly affect dots
+// Replace ONLY the block under your [C] Noise Filtering section with this:
+
+// ---- [C] Noise Filtering 적용 (vis/size에 강하게 반영) ----
+  if(uUseNoise) {
+  // 셀 기준 노이즈 좌표: 셀 위치가 변할 때마다 확실히 달라지도록 cell 사용
+    vec2 nUV = (cell + vec2(uNoiseSeed * 0.123, uNoiseSeed * 0.789)) * uNoiseScale;
+    float n01 = fbm(nUV);           // 0..1
+    float n11 = n01 * 2.0 - 1.0;    // -1..1
+
+  // (1) 확률적 드롭아웃: 노이즈가 threshold보다 작으면 점 자체를 제거
+  //    → 효과가 가장 눈에 띄는 방식
+    float thresh = clamp(0.5 + 0.5 * uNoiseBias, 0.0, 1.0);   // 기준선
+    float swing = 0.5 * uNoiseAmp;                           // 가변폭
+  // n01가 (thresh - swing, thresh + swing) 주변에서 드롭/패스가 갈린다
+    if(n01 < clamp(thresh + swing * n11, 0.0, 1.0)) {
+      discard; // 점 제거
+    }
+
+  // (2) 점 크기 지터: rDot을 셀마다 흔들어 ‘자잘한 다양성’ 추가
+    float rJit = rDot * clamp(1.0 + 0.6 * uNoiseAmp * n11, 0.2, 1.8);
+    vec2 qJ = fract(p) - 0.5;
+    float dotMaskJ = step(length(qJ), rJit);
+
+  // (3) 알파 게인: 남은 점의 강도에 미세한 밝기 변화
+    float gain = clamp(1.0 + 0.6 * uNoiseBias + 0.6 * uNoiseAmp * n11, 0.0, 2.0);
+
+    vis = clamp(dotMaskJ * gain, 0.0, 1.0);
+  }
+
+  gl_FragColor = vec4(col, vis);
 }

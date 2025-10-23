@@ -187,7 +187,7 @@ const params = {
   cellJitter: 0.6,
   rimMicro: 5.0,
   growSpeed: 0.4,
-  disp: 1.8,
+  disp: 2.0,
   stepContrast: 0.2,
   stepVar: 0.45,
   minStep: 0.028,
@@ -232,7 +232,7 @@ const params = {
   baseDarkMin: 0.4, // 하부 색 배율 (낮을수록 더 어두움)
   baseDarkMax: 1.0, // 정상 색 배율
   baseDarkEnd: 0.25, // 어두움 적용이 끝나는 높이 (0~1)
-  bandToneFeather: 1.2,
+  bandToneFeather: 1.8,
 };
 let seed = Math.random() * 1000;
 
@@ -866,15 +866,29 @@ function buildPoints(
   }
 
   geom.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+  // 원형 알파 스프라이트 텍스처 생성
+  const circle = document.createElement("canvas");
+  circle.width = circle.height = 64;
+  const ctx = circle.getContext("2d");
+  ctx.clearRect(0, 0, 64, 64);
+  ctx.beginPath();
+  ctx.arc(32, 32, 30, 0, Math.PI * 2);
+  ctx.closePath();
+  ctx.fillStyle = "white";
+  ctx.fill();
+  const circleTex = new THREE.CanvasTexture(circle);
+  circleTex.minFilter = THREE.LinearFilter;
+  circleTex.magFilter = THREE.LinearFilter;
+
   const mat = new THREE.PointsMaterial({
     size: 6.0,
-    sizeAttenuation: false,
+    sizeAttenuation: true, // 거리 감쇠 켬
+    map: circleTex, // 원형 알파맵
     color,
+    alphaTest: 0.5, // 네모 모서리 제거
+    transparent: true,
     depthTest: true,
     depthWrite: false,
-    transparent: true,
-    blending: THREE.NormalBlending,
-    opacity: 1.0,
   });
   return new THREE.Points(geom, mat);
 }
@@ -1302,13 +1316,15 @@ function bake(dt) {
   renderer.setRenderTarget(null);
 
   // 부드러운 실루엣을 위해 2패스 정도 블러
-  blurRTInPlace(heightDispRT, 2);
+  blurRTInPlace(heightDispRT, 3);
 
   // 1.5) ★ 경계 소프트닝(후처리)
   edgeSoftenMat.uniforms.heightTex.value = heightRT.texture;
   edgeSoftenMat.uniforms.bands.value = params.bands;
   // 필요하면 라디오/엣지 계수도 소스 파라미터로 연결
-  edgeSoftenMat.uniforms.radius.value = 1.0;
+
+  edgeSoftenMat.uniforms.radius.value = 1.5;
+  edgeSoftenMat.uniforms.mixAmt.value = 0.9;
   edgeSoftenMat.uniforms.edgeBoost.value = 3.0;
 
   bakeQuad.material = edgeSoftenMat;
@@ -1328,7 +1344,6 @@ function bake(dt) {
   }
   heightRT.texture.needsUpdate = true;
   heightRT.texture.magFilter = THREE.LinearFilter;
-  colorRT.texture.anisotropy = aniso;
 
   // normal
   renderer.setRenderTarget(normalRT);
@@ -1338,6 +1353,10 @@ function bake(dt) {
   normalMat.uniforms.bands.value = params.bands;
   bakeQuad.material = normalMat;
   renderer.render(bakeScene, fsCam);
+
+  normalRT.texture.generateMipmaps = true;
+  normalRT.texture.minFilter = THREE.LinearMipmapLinearFilter;
+  normalRT.texture.magFilter = THREE.LinearFilter;
   normalRT.texture.needsUpdate = true;
 
   // color
@@ -1347,10 +1366,12 @@ function bake(dt) {
   colorMat.uniforms.normalTex.value = normalRT.texture;
   colorMat.uniforms.heightTexSharp.value = heightRT.texture; // 샤프(기울기/능선)
   normalMat.uniforms.heightTexBlur.value = heightBlurRT.texture;
-  normalRT.texture.minFilter = THREE.LinearFilter;
 
   renderer.render(bakeScene, fsCam);
   colorRT.texture.anisotropy = aniso;
+  colorRT.texture.generateMipmaps = true;
+  colorRT.texture.minFilter = THREE.LinearMipmapLinearFilter;
+  colorRT.texture.magFilter = THREE.LinearFilter;
   colorRT.texture.needsUpdate = true;
 
   renderer.setRenderTarget(maskRT);
@@ -1742,7 +1763,7 @@ function animate() {
   terrainMat.metalness = 0.0;
   terrainMat.normalMap = normalRT.texture;
   terrainMat.normalMap.colorSpace = THREE.NoColorSpace;
-  terrainMat.normalScale.set(6.0, -6.0);
+  terrainMat.normalScale.set(3.0, -3.0);
 
   if (frameCount % 3 === 0) stepRD();
   if (frameCount % 8 === 0) needBake = true; // 주기적 베이크도 큐잉으로 변경

@@ -1,3 +1,4 @@
+//normal.frag.glsl
 precision highp float;
 uniform sampler2D heightTex;
 uniform sampler2D heightTexBlur;

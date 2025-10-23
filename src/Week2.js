@@ -7,13 +7,17 @@ import { RenderPass } from "three/addons/postprocessing/RenderPass.js";
 import { ShaderPass } from "three/addons/postprocessing/ShaderPass.js";
 import { FXAAShader } from "three/addons/shaders/FXAAShader.js";
 import { SMAAPass } from "three/addons/postprocessing/SMAAPass.js";
+import { LOD } from "three";
 
 const renderer = new THREE.WebGLRenderer({
   antialias: true,
   powerPreference: "high-performance",
 });
 renderer.setSize(innerWidth, innerHeight);
-renderer.setPixelRatio(1.0);
+
+const DPR = Math.min(window.devicePixelRatio || 1, 2);
+renderer.setPixelRatio(DPR);
+
 renderer.outputColorSpace = THREE.SRGBColorSpace;
 renderer.toneMapping = THREE.LinearToneMapping;
 renderer.toneMappingExposure = 1.0;
@@ -46,10 +50,10 @@ composer.addPass(new RenderPass(scene, camera));
 
 const fxaa = new ShaderPass(FXAAShader);
 fxaa.material.uniforms["resolution"].value.set(1 / innerWidth, 1 / innerHeight);
-composer.addPass(fxaa);
 
 const smaaPass = new SMAAPass(innerWidth, innerHeight);
 composer.addPass(smaaPass);
+smaaPass.setSize(innerWidth * DPR, innerHeight * DPR);
 
 const aniso = 1;
 
@@ -182,7 +186,7 @@ const params = {
   fractureFreq: 9.0,
   cellJitter: 0.6,
   rimMicro: 5.0,
-  growSpeed: 0.2,
+  growSpeed: 0.4,
   disp: 1.6,
   stepContrast: 0.2,
   stepVar: 0.45,
@@ -521,6 +525,20 @@ const heightRT = new THREE.WebGLRenderTarget(SIM_SIZE, SIM_SIZE, {
 
 const heightBlurRT = new THREE.WebGLRenderTarget(SIM_SIZE >> 1, SIM_SIZE >> 1, {
   type: THREE.UnsignedByteType,
+  format: THREE.RGBAFormat,
+  colorSpace: THREE.NoColorSpace,
+  minFilter: THREE.LinearFilter,
+  magFilter: THREE.LinearFilter,
+  wrapS: THREE.ClampToEdgeWrapping,
+  wrapT: THREE.ClampToEdgeWrapping,
+  depthBuffer: false,
+  stencilBuffer: false,
+  generateMipmaps: false,
+});
+
+// 디스플레이스 전용: 풀해상도 블러 높이
+const heightDispRT = new THREE.WebGLRenderTarget(SIM_SIZE, SIM_SIZE, {
+  type: THREE.HalfFloatType, // heightRT와 동일
   format: THREE.RGBAFormat,
   colorSpace: THREE.NoColorSpace,
   minFilter: THREE.LinearFilter,
@@ -1277,6 +1295,15 @@ function bake(dt) {
   renderer.render(bakeScene, fsCam);
   renderer.setRenderTarget(null);
 
+  copyMat.uniforms.tex.value = heightRT.texture;
+  fsQuad.material = copyMat;
+  renderer.setRenderTarget(heightDispRT);
+  renderer.render(fsScene, fsCam);
+  renderer.setRenderTarget(null);
+
+  // 부드러운 실루엣을 위해 2패스 정도 블러
+  blurRTInPlace(heightDispRT, 2);
+
   // 1.5) ★ 경계 소프트닝(후처리)
   edgeSoftenMat.uniforms.heightTex.value = heightRT.texture;
   edgeSoftenMat.uniforms.bands.value = params.bands;
@@ -1337,7 +1364,7 @@ function bake(dt) {
 }
 
 /* ─ Terrain ─ */
-const DIV = 512;
+const DIV = 1024;
 const terrainGeo = new THREE.PlaneGeometry(SIZE, SIZE, DIV, DIV);
 terrainGeo.rotateX(-Math.PI / 2);
 
@@ -1353,10 +1380,21 @@ const terrainMat = new THREE.MeshStandardMaterial({
   emissiveIntensity: 0.0,
 });
 terrainMat.envMapIntensity = 0.3;
-const terrain = new THREE.Mesh(terrainGeo, terrainMat);
-terrain.castShadow = true;
-terrain.receiveShadow = true;
-scene.add(terrain);
+
+// LOD 구성
+const lod = new LOD();
+function makeMesh(div) {
+  const g = new THREE.PlaneGeometry(SIZE, SIZE, div, div);
+  g.rotateX(-Math.PI / 2);
+  return new THREE.Mesh(g, terrainMat);
+}
+lod.addLevel(makeMesh(1024), 0);
+lod.addLevel(makeMesh(512), 12);
+lod.addLevel(makeMesh(256), 24);
+scene.add(lod);
+
+// 레이캐스트 등에서 사용할 공용 참조
+const terrain = lod;
 
 let _pdsModulePromise = null;
 
@@ -1674,6 +1712,7 @@ addEventListener("resize", () => {
   camera.aspect = innerWidth / innerHeight;
   camera.updateProjectionMatrix();
   renderer.setSize(innerWidth, innerHeight);
+  smaaPass.setSize(innerWidth * DPR, innerHeight * DPR);
   fxaa.material.uniforms["resolution"].value.set(
     1 / innerWidth,
     1 / innerHeight

@@ -1,66 +1,57 @@
 import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
-import { terrainRoot, initTerrain, updateTerrain } from "./terrain.js";
+import { terrainRoot, tickUniforms } from "./terrain.js";
+import { characterRoot } from "./character.js";
 
-let renderer, scene, camera, controls, clock;
+// 기본 장면/카메라/렌더러
+const scene = new THREE.Scene();
 
-init();
-animate();
+const camera = new THREE.PerspectiveCamera(
+  50,
+  window.innerWidth / window.innerHeight,
+  0.1,
+  1000
+);
+camera.position.set(90, 60, 90);
+camera.lookAt(0, 0, 0);
 
-async function init() {
-  // Renderer
-  renderer = new THREE.WebGLRenderer({ antialias: true });
-  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
-  renderer.setSize(window.innerWidth, window.innerHeight);
-  renderer.outputColorSpace = THREE.SRGBColorSpace;
-  document.body.appendChild(renderer.domElement);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.setSize(window.innerWidth, window.innerHeight);
+document.body.appendChild(renderer.domElement);
 
-  // Scene & Camera
-  scene = new THREE.Scene();
-  scene.background = new THREE.Color(0x0b0e13);
-  scene.fog = new THREE.Fog(0x0b0e13, 120, 280);
+// 컨트롤
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.target.set(0, 0, 0);
 
-  camera = new THREE.PerspectiveCamera(
-    55,
-    window.innerWidth / window.innerHeight,
-    0.1,
-    2000
-  );
-  camera.position.set(70, 55, 90);
+// 지형 추가
+scene.add(terrainRoot);
+scene.add(characterRoot);
+characterRoot.scale.setScalar(10);
 
-  // Controls
-  controls = new OrbitControls(camera, renderer.domElement);
-  controls.enableDamping = true;
-  controls.dampingFactor = 0.05;
-  controls.target.set(0, 0, 0);
-  controls.update();
-
-  // Lights (지형 셰이더는 자체 램버트 계산을 하지만 씬 느낌을 위해 약간 추가)
-  const hemi = new THREE.HemisphereLight(0x88aaff, 0x223344, 0.3);
-  scene.add(hemi);
-
-  // Terrain
-  scene.add(terrainRoot);
-  await initTerrain(); // GLSL 로드 및 머티리얼 연결
-
-  // Clock
-  clock = new THREE.Clock();
-
-  // Resize
-  window.addEventListener("resize", onResize);
-}
-
-function onResize() {
-  camera.aspect = window.innerWidth / window.innerHeight;
+// 리사이즈
+window.addEventListener("resize", () => {
+  const w = window.innerWidth;
+  const h = window.innerHeight;
+  camera.aspect = w / h;
   camera.updateProjectionMatrix();
-  renderer.setSize(window.innerWidth, window.innerHeight);
-}
+  renderer.setSize(w, h);
+});
+
+// 루프
+const clock = new THREE.Clock();
 
 function animate() {
-  requestAnimationFrame(animate);
-  const t = clock ? clock.getElapsedTime() : 0.0;
+  const t = clock.getElapsedTime();
+  // terrain 유니폼 시간 업데이트
+  if (tickUniforms) {
+    tickUniforms.uTime.value = t;
+  }
 
   controls.update();
-  updateTerrain(t);
   renderer.render(scene, camera);
+  requestAnimationFrame(animate);
 }
+
+animate();

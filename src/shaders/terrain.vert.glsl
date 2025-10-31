@@ -1,69 +1,66 @@
-precision highp float;
+precision mediump float;
 
+// ----- 유니폼 -----
 uniform float uTime;
 uniform float uAmp;
 uniform float uFreq;
-uniform float uSpeed;
 
-varying vec3 vWorldPos;
-varying vec3 vNormal;
-varying float vHeight;
+// ----- varying -----
+varying float vH;       // 높이(변위) 전달
 
-// -------------------------
-// Simplex-ish noise (2D)
-// -------------------------
-vec2 hash(vec2 p) {
-  p = vec2(dot(p, vec2(127.1, 311.7)), dot(p, vec2(269.5, 183.3)));
-  return -1.0 + 2.0 * fract(sin(p) * 43758.5453123);
+// ---- 간단한 2D value noise (Perlin-like) ----
+float hash(vec2 p) {
+  // 작은 해시: -1 ~ 1
+  p = fract(p * vec2(123.34, 345.45));
+  p += dot(p, p + 34.345);
+  return fract(p.x * p.y) * 2.0 - 1.0;
 }
 
-float noise2D(vec2 p) {
-  const float K1 = 0.366025404; // (sqrt(3)-1)/2
-  const float K2 = 0.211324865; // (3-sqrt(3))/6
+float noise2(vec2 p) {
+  vec2 i = floor(p);
+  vec2 f = fract(p);
 
-  vec2 i = floor(p + (p.x + p.y) * K1);
-  vec2 a = p - i + (i.x + i.y) * K2;
-  vec2 o = (a.x > a.y) ? vec2(1.0, 0.0) : vec2(0.0, 1.0);
-  vec2 b = a - o + K2;
-  vec2 c = a - 1.0 + 2.0 * K2;
+  float a = hash(i + vec2(0.0, 0.0));
+  float b = hash(i + vec2(1.0, 0.0));
+  float c = hash(i + vec2(0.0, 1.0));
+  float d = hash(i + vec2(1.0, 1.0));
 
-  vec3 h = max(0.5 - vec3(dot(a, a), dot(b, b), dot(c, c)), 0.0);
-  vec3 n = h * h * h * h * vec3(dot(hash(i + 0.0), a), dot(hash(i + o), b), dot(hash(i + 1.0), c));
-  return dot(n, vec3(70.0));
+  vec2 u = f * f * (3.0 - 2.0 * f); // smoothstep
+  return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
 }
 
 float fbm(vec2 p) {
-  float f = 0.0;
-  float a = 0.5;
-  float fr = 1.0;
-  for(int i = 0; i < 5; i++) {
-    f += a * noise2D(p * fr);
-    fr *= 2.0;
-    a *= 0.5;
+  float acc = 0.0;
+  float amp = 0.5;
+  float freq = 1.0;
+  // 4 옥타브: 완만하고 유기적인 반복
+  for(int i = 0; i < 4; i++) {
+    acc += noise2(p * freq) * amp;
+    freq *= 2.0;
+    amp *= 0.5;
   }
-  return f;
+  return acc;
 }
 
-// Three.js가 아래 변수/행렬/속성은 자동 주입하므로 재선언 금지!
-// - attribute: position, normal
-// - uniform: modelMatrix, modelViewMatrix, projectionMatrix, normalMatrix
-
 void main() {
-  // xz에서 흐르는 노이즈 + 약간의 인공 밴딩
-  vec2 p = position.xz * uFreq + vec2(uTime * uSpeed, 0.0);
-  float band = 0.08 * sin(position.x * 0.07 + uTime * 0.4);
+  // Three.js 내장 attribute 사용 (재선언 금지)
+  vec3 p = position;
 
-  float h = fbm(p) + band;
-  float y = h * uAmp;
-  vec3 displaced = vec3(position.x, y, position.z);
+  // PlaneGeometry를 XZ 평면으로 사용하므로 x,z를 샘플링
+  vec2 uv2 = vec2(p.x, p.z) * uFreq;
 
-  // 월드 좌표 & 노멀
-  vec4 worldPos = modelMatrix * vec4(displaced, 1.0);
-  vWorldPos = worldPos.xyz;
+  // 아주 느린 시간 변조로 '바람 같은' 흐름
+  float t = uTime * 0.05;
+  float h = fbm(uv2 + vec2(t * 0.25, -t * 0.13));
 
-  // 간단: 원 노멀 사용 (정밀은 미분 노멀 계산)
-  vNormal = normalize(normalMatrix * normal);
-  vHeight = y;
+  // 약간의 주기 흔적(인공성) 추가: 미세한 sinusoid 섞기
+  h += 0.1 * sin((p.x + p.z) * 0.03 + t * 0.5);
 
-  gl_Position = projectionMatrix * modelViewMatrix * vec4(displaced, 1.0);
+  // 높이 변위
+  float disp = (h - 0.5) * 2.0 * uAmp;
+  p.y += disp;
+
+  vH = clamp(h, 0.0, 1.0);
+
+  gl_Position = projectionMatrix * modelViewMatrix * vec4(p, 1.0);
 }

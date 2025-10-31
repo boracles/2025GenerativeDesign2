@@ -40,6 +40,8 @@ loader.load(
     try {
       const model = gltf.scene || gltf.scenes[0];
       model.updateMatrixWorld(true);
+      model.position.set(0, 0, 0); // ✅ GLB 내부 오프셋 제거
+      model.rotation.set(0, 0, 0);
 
       // 1) 바운딩 박스 → 스케일 보정
       const box = new THREE.Box3().setFromObject(model);
@@ -79,15 +81,20 @@ loader.load(
   }
 );
 
-// ----- RD 머티리얼 적용 유틸 -----
 function applyRDMaterial(root, tex) {
+  // glTF 메시와 정합: 커스텀 텍스처는 뒤집힘 방지
+  tex.flipY = false; // ✅ glTF와 호환
+  tex.colorSpace = THREE.SRGBColorSpace;
+  tex.wrapS = THREE.RepeatWrapping;
+  tex.wrapT = THREE.RepeatWrapping;
+  tex.repeat.set(1, 1);
+
   root.traverse((obj) => {
     if (!obj.isMesh) return;
 
     const geom = obj.geometry;
     if (!geom || !geom.getAttribute) return;
 
-    // UV 없으면 경고만 출력하고 기존 머티리얼 유지
     if (!geom.getAttribute("uv")) {
       console.warn(
         `[character] UV missing on mesh "${
@@ -97,43 +104,26 @@ function applyRDMaterial(root, tex) {
       return;
     }
 
-    // 기존 재질 정리(메모리 관리)
     const oldMat = obj.material;
 
-    // GLB 원본 특성 유지 플래그
+    // three r160+: skinning/morphTargets/morphNormals은 더 이상 머티리얼 속성이 아님 (자동 인식)
     const hasVertexColors = !!geom.getAttribute("color");
-    const isSkinned = obj.isSkinnedMesh === true;
-    const hasMorphTargets =
-      !!obj.morphTargetInfluences ||
-      (geom.morphAttributes &&
-        (geom.morphAttributes.position || geom.morphAttributes.normal));
-    const hasMorphNormals = !!(
-      geom.morphAttributes && geom.morphAttributes.normal
-    );
 
     const newMat = new THREE.MeshStandardMaterial({
       map: tex,
       roughness: 0.8,
       metalness: 0.1,
-      skinning: isSkinned,
-      morphTargets: !!hasMorphTargets,
-      morphNormals: !!hasMorphNormals,
       vertexColors: hasVertexColors,
-      // 투명 젤리 느낌 원하면:
-      // transparent: true,
-      // opacity: 0.8,
+      // transparent: true, opacity: 0.85, roughness: 0.2  // ← 젤리 느낌 원할 때
     });
 
     obj.material = newMat;
     obj.material.needsUpdate = true;
 
-    // 배열/단일 모두 안전 제거 시도
+    // 메모리 정리
     try {
-      if (Array.isArray(oldMat))
-        oldMat.forEach((m) => m && m.dispose && m.dispose());
-      else oldMat && oldMat.dispose && oldMat.dispose();
-    } catch (_) {
-      /* noop */
-    }
+      if (Array.isArray(oldMat)) oldMat.forEach((m) => m?.dispose?.());
+      else oldMat?.dispose?.();
+    } catch {}
   });
 }

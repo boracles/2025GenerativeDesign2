@@ -19,9 +19,9 @@ export const tickUniforms = {
   uTime: { value: 0 },
   uAmp: { value: 3.0 }, // 변위 진폭
   uFreq: { value: 0.02 }, // 노이즈 주파수 (낮을수록 완만)
-  uTintA: { value: new THREE.Color(0x36115b) }, // 보라계열 저지대
-  uTintB: { value: new THREE.Color(0x8a77b9) }, // 보라계열 중간
-  uTintC: { value: new THREE.Color(0xd6cfff) }, // 보라계열 고지대 하이라이트
+  uTintA: { value: new THREE.Color(0x265d74) }, // 보라계열 저지대
+  uTintB: { value: new THREE.Color(0x407e88) }, // 보라계열 중간
+  uTintC: { value: new THREE.Color(0xd17a8e) }, // 보라계열 고지대 하이라이트
 };
 
 // ShaderMaterial (fog: false 고정)

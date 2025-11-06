@@ -1,8 +1,7 @@
-// src/lsystem.js
 import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 
-/* ===================== 기본 세팅 ===================== */
+// 기본 세팅
 const hud = document.getElementById("hud");
 
 const renderer = new THREE.WebGLRenderer({ antialias: true });
@@ -25,7 +24,7 @@ controls.enableDamping = true;
 
 let advanceTimer = null; // 다음 세대 예약 타이머
 let allSegments = []; // 누적 세그먼트
-let globalMaxHeightConst = 1; // ▶︎ 모든 색 계산에 쓰는 '고정' 전역최대높이
+let globalMaxHeightConst = 1; // ▶모든 색 계산에 쓰는 '고정' 전역최대높이
 
 // 가이드
 scene.add(new THREE.AxesHelper(2));
@@ -36,7 +35,7 @@ const dirLight = new THREE.DirectionalLight(0xffffff, 0.9);
 dirLight.position.set(3, 5, 4);
 scene.add(dirLight);
 
-/* 파라미터 */
+// 파라미터
 const params = {
   axiom: "F",
   rule: { F: "F[+F]F[-F]F" },
@@ -50,7 +49,8 @@ const params = {
   colorTop: 0x1e3a8a,
 };
 
-/* ===================== 유틸: 규칙 확장/파싱 ===================== */
+/* 유틸: 규칙 확장/파싱 */
+// F[+F]F[-F]F [ + F[+F]F[-F]F ] F[+F]F[-F]F [ - F[+F]F[-F]F ] F[+F]F[-F]F
 function expand(axiom, rule, iterations) {
   let s = axiom;
   for (let i = 0; i < iterations; i++) {
@@ -125,7 +125,7 @@ function buildSegments(instructions, { step, angleRad, decay, baseRadius }) {
   return segments;
 }
 
-/* ===================== 세그먼트 → 메쉬 ===================== */
+// 세그먼트 → 메쉬
 function meshesFromSegments(
   segments,
   { colorBottom, colorTop, globalMaxHeight }
@@ -187,7 +187,7 @@ function meshesFromSegments(
   return list;
 }
 
-/* ===================== 시퀀스 엔진 ===================== */
+// 시퀀스 엔진
 let stems = [];
 let currentSeg = 0;
 let growing = null;
@@ -208,7 +208,7 @@ function getSegmentsForGen(gen) {
   });
 }
 
-// ▶︎ 전역최대높이 재계산 (genMax/각도/감쇠 등 바뀔 때 호출)
+// 전역최대높이 재계산 (genMax/각도/감쇠 등 바뀔 때 호출)
 function recomputeGlobalMax() {
   const finalSegs = getSegmentsForGen(params.genMax);
   globalMaxHeightConst = finalSegs.length
@@ -237,7 +237,7 @@ function buildGeneration(gen) {
   const newMeshes = meshesFromSegments(newSegs, {
     colorBottom: params.colorBottom,
     colorTop: params.colorTop,
-    globalMaxHeight: globalMaxHeightConst, // ★ 항상 고정 기준
+    globalMaxHeight: globalMaxHeightConst, // 항상 고정 기준
   });
 
   stems.push(...newMeshes);
@@ -262,8 +262,8 @@ function updateHUD(gen, str, segCount) {
   `;
 }
 
-/* ===================== 초기 빌드 & 루프 ===================== */
-recomputeGlobalMax(); // ★ 먼저 고정 기준 계산
+// 초기 빌드 & 루프
+recomputeGlobalMax(); // 먼저 고정 기준 계산
 buildGeneration(currentGen);
 
 function animate() {
@@ -282,7 +282,6 @@ function animate() {
 
   if (!growing && currentSeg < stems.length) {
     growing = stems[currentSeg];
-    scene.add(growing);
     currentSeg++;
   }
 
@@ -305,7 +304,7 @@ function animate() {
 }
 animate();
 
-/* ===================== 프레이밍 ===================== */
+// 프레이밍
 function fitCameraToSegments(segs, padding = 1.0) {
   if (!segs.length) return;
 
@@ -348,7 +347,7 @@ function fitCameraToSegments(segs, padding = 1.0) {
   controls.update();
 }
 
-/* ===================== 인터랙션 ===================== */
+// 인터랙션
 addEventListener("resize", () => {
   camera.aspect = innerWidth / innerHeight;
   camera.updateProjectionMatrix();
@@ -427,7 +426,7 @@ function resetAndReframe() {
   currentSeg = 0;
   growing = null;
   elapsed = 0;
-  recomputeGlobalMax(); // ★ 새 파라미터 기준으로 고정값 갱신
+  recomputeGlobalMax(); // 새 파라미터 기준으로 고정값 갱신
   currentGen = Math.min(currentGen, params.genMax);
   buildGeneration(currentGen);
 }

@@ -30,6 +30,9 @@ const scaleDecay = 0.7; // 세대별 두께 감쇠 비율
 const posStack = [];
 const dirStack = [];
 const scaleStack = [];
+const heightStack = []; // 전역 높이 스택
+let heightFromRoot = 0; // 루트로부터 누적 높이
+
 let position = new THREE.Vector3(0, 0, 0);
 let direction = new THREE.Vector3(0, 1, 0);
 let currentScale = 0.12; // 초기 줄기 두께
@@ -40,24 +43,28 @@ function rotate3D(dir, axis, radians) {
 }
 
 const segments = [];
+
 for (let char of instructions) {
   switch (char) {
     case "F": {
+      const len = step; // 지금은 모든 F 길이가 step
       const newPos = position
         .clone()
-        .add(direction.clone().multiplyScalar(step));
-      const nextRadius = currentScale * 0.7; // taper 비율만 반영
+        .add(direction.clone().multiplyScalar(len));
+      const nextRadius = currentScale * 0.7;
 
       segments.push({
         start: position.clone(),
         end: newPos.clone(),
         radiusBottom: currentScale,
         radiusTop: nextRadius,
+        hStart: heightFromRoot, // ★ 이 마디 시작의 전역 높이
+        hEnd: heightFromRoot + len, // ★ 이 마디 끝의 전역 높이
       });
 
       position = newPos.clone();
-      // ❌ currentScale *= scaleDecay;  ← 제거!
-      currentScale = nextRadius; // 중심 줄기는 taper만으로 연결
+      heightFromRoot += len; // ★ 전역 높이 증가
+      currentScale = nextRadius;
       break;
     }
 
@@ -69,56 +76,70 @@ for (let char of instructions) {
       break;
 
     case "[": {
-      // 가지 분기 시작 → 부모 상태 저장
       posStack.push(position.clone());
       dirStack.push(direction.clone());
       scaleStack.push(currentScale);
-      currentScale *= scaleDecay; // 가지는 감쇠된 두께로 시작
+      heightStack.push(heightFromRoot); // ★ 높이도 저장
+      currentScale *= scaleDecay;
       break;
     }
 
     case "]": {
-      // 가지 분기 끝 → 부모 상태 복원
       position = posStack.pop();
       direction = dirStack.pop();
       currentScale = scaleStack.pop();
+      heightFromRoot = heightStack.pop(); // ★ 분기 종료 시 높이 복원
       break;
     }
   }
 }
+const maxHeight = segments.length ? segments[segments.length - 1].hEnd : 1; // ★ 전체 높이
 
-// --- Cylinder 생성 ---
-function createBranch(start, end, radiusBottom, radiusTop, color = 0x2266aa) {
+const COLOR_BOTTOM = new THREE.Color(0x2e7d32); // 진한 녹색(루트)
+const COLOR_TOP = new THREE.Color(0x1e3a8a); // 깊은 청색(꼭대기)
+
+function createBranch(start, end, radiusBottom, radiusTop, hStart, hEnd) {
   const dir = new THREE.Vector3().subVectors(end, start);
   const len = dir.length();
 
-  // 1️⃣ Cylinder 기본 생성
   const geom = new THREE.CylinderGeometry(
     radiusTop,
     radiusBottom,
     len,
-    20,
+    24,
     1,
     false
   );
 
-  const mat = new THREE.MeshStandardMaterial({ color });
+  // ▼ 전역 높이 기준 그라데이션: 루트(0)→최대높이(maxHeight)
+  const pos = geom.attributes.position;
+  const colors = new Float32Array(pos.count * 3);
+  for (let i = 0; i < pos.count; i++) {
+    const yLocal = pos.getY(i); // -len/2 ~ +len/2 (translate 전)
+    const yWorld = hStart + (yLocal + len / 2); // ★ 이 버텍스의 전역 높이
+    const t = THREE.MathUtils.clamp(yWorld / maxHeight, 0, 1);
+    const col = COLOR_BOTTOM.clone().lerp(COLOR_TOP, t);
+    colors[i * 3 + 0] = col.r;
+    colors[i * 3 + 1] = col.g;
+    colors[i * 3 + 2] = col.b;
+  }
+  geom.setAttribute("color", new THREE.BufferAttribute(colors, 3));
+  // ▲ 전역 그라데이션
+
+  const mat = new THREE.MeshStandardMaterial({
+    vertexColors: true,
+    roughness: 0.9,
+    metalness: 0.0,
+  });
   const mesh = new THREE.Mesh(geom, mat);
 
-  // 2️⃣ 방향 회전 먼저 적용
   const quat = new THREE.Quaternion();
   quat.setFromUnitVectors(new THREE.Vector3(0, 1, 0), dir.clone().normalize());
   mesh.applyQuaternion(quat);
 
-  // 3️⃣ 이제 pivot을 아래로 내리고 (회전 후 기준으로!)
   geom.translate(0, len / 2, 0);
-
-  // 4️⃣ 회전된 방향에 따라 위치 정확히 보정
   mesh.position.copy(start);
-
-  // 5️⃣ 길이 0에서 자라나는 애니메이션용 scale
   mesh.scale.set(1, 0, 1);
-
   return mesh;
 }
 
@@ -151,9 +172,9 @@ function animate() {
   }
 
   if (!growing && currentIndex < segments.length) {
-    const { start, end, radiusBottom, radiusTop } = segments[currentIndex];
-    const color = currentIndex === 0 ? 0x00ff00 : 0x2266aa;
-    growing = createBranch(start, end, radiusBottom, radiusTop, color);
+    const { start, end, radiusBottom, radiusTop, hStart, hEnd } =
+      segments[currentIndex];
+    growing = createBranch(start, end, radiusBottom, radiusTop, hStart, hEnd); // ★ 색용 높이 전달
     scene.add(growing);
     currentIndex++;
   }

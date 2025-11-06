@@ -1,418 +1,295 @@
 import * as THREE from "three";
-import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 
-/* ============ 공통 세팅 ============ */
-const hud = document.getElementById("hud");
-const renderer = new THREE.WebGLRenderer({ antialias: true });
-renderer.setSize(innerWidth, innerHeight);
-renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
-renderer.setScissorTest(true); // ← 멀티 뷰포트
-document.body.appendChild(renderer.domElement);
+/* ──────────────────────────────────────────────────────────
+   WeirdPlant L-System (garlic scape / 마늘쫑, 감쇠 + 가지)
+   ────────────────────────────────────────────────────────── */
 
-let GLOBAL_COMPARE_BOUNDS = null; // {min, max}
+let _root = null;
+let _t = 0;
 
-// 비교 프리셋 (2 × 3)
-const PRESETS = [
-  { angleDeg: 10, decay: 0.95 },
-  { angleDeg: 25, decay: 0.95 },
-  { angleDeg: 40, decay: 0.95 },
-  { angleDeg: 10, decay: 0.6 },
-  { angleDeg: 25, decay: 0.6 },
-  { angleDeg: 40, decay: 0.6 },
-];
-const GRID = { cols: 3, rows: 2 };
+export const api = {
+  // 스케일 & 감쇠
+  step: 0.28,
+  radius: 0.035,
+  radiusDecay: 0.86, // F마다 줄기 반경 감쇠
+  stepDecay: 0.96, // F마다 길이 감쇠
+  branchEnterRadiusMul: 0.85,
+  branchEnterStepMul: 0.9,
 
-/* 전역 파라미터: 규칙/세대/길이/색 */
-const params = {
-  axiom: "F",
-  rule: { F: "F[+F]F[-F]F" },
-  genMax: 2, // 0~2세대
-  step: 1.0,
-  baseRadius: 0.12,
-  growDuration: 0.8, // 세그먼트 하나 성장 시간
-  colorBottom: 0x2e7d32,
-  colorTop: 0x1e3a8a,
+  // 곡률(각도)
+  arcDeg: 22,
+  pitchDeg: 10,
+
+  // 분기/봉오리
+  forceBranchEveryN: 2,
+  branchProb: 0.55,
+  budProb: 0.24,
+  budRadiusMul: 5.0, // ← 열매 반경 = 현재 줄기반경 × 이 값
+
+  // 곡선 노이즈 & 흔들림
+  jitter: 0.08,
+  driftMul: 0.45,
+  swayAmp: 0.1,
+  swayFreq: 0.6,
+
+  // 컬러
+  colorBottom: 0x8b1a1a,
+  colorTop: 0xff6b6b,
+  budColor: 0xd32f2f,
+
+  // 전체 스케일
+  plantScale: 1.5, // ← 식물 전체 크기 업
+
+  genMax: 4,
 };
 
-/* ============ 문자열 확장/세그먼트 생성 ============ */
-// 2세대 문자열 예시: F[+F]F[-F]F [ + F[+F]F[-F]F ] F[+F]F[-F]F [ - F[+F]F[-F]F ] F[+F]F[-F]F
-function expand(axiom, rule, iterations) {
-  let s = axiom;
-  for (let i = 0; i < iterations; i++) {
-    let next = "";
-    for (const ch of s) next += rule[ch] ?? ch;
-    s = next;
+const deg = (d) => THREE.MathUtils.degToRad(d);
+
+class TurtleState {
+  constructor(p, dir, right, up, step, rad, h) {
+    this.p = p.clone();
+    this.dir = dir.clone();
+    this.right = right.clone();
+    this.up = up.clone();
+    this.step = step;
+    this.rad = rad;
+    this.h = h;
   }
-  return s;
 }
 
-function buildSegments(instructions, { step, angleRad, decay, baseRadius }) {
-  const posStack = [],
-    dirStack = [],
-    scaleStack = [],
-    heightStack = [];
-  let position = new THREE.Vector3(0, 0, 0);
-  let direction = new THREE.Vector3(0, 1, 0);
-  let currentScale = baseRadius;
-  let heightFromRoot = 0;
+/* ---------------- 확장 ---------------- */
+function expand(axiom, iterations) {
+  const pick = (arr) => arr[(Math.random() * arr.length) | 0];
+  let s = axiom;
 
-  const segments = [];
-  const rotate3D = (dir, axis, rad) => {
-    const m = new THREE.Matrix4().makeRotationAxis(axis, rad);
-    dir.applyMatrix4(m).normalize();
-  };
+  for (let i = 0; i < iterations; i++) {
+    let out = "";
+    for (const ch of s) {
+      if (ch === "X") {
+        out += pick([
+          "F R F R F r F R F",
+          "F r F R F r R F",
+          "F R F r F R R F",
+          "F R F R F r r F",
+        ]);
+      } else if (ch === "F") {
+        out += Math.random() < 0.12 ? "FF" : "F";
+      } else {
+        out += ch;
+      }
+    }
+    s = out;
+  }
 
-  for (const ch of instructions) {
-    switch (ch) {
-      case "F": {
-        const len = step;
-        const newPos = position
-          .clone()
-          .add(direction.clone().multiplyScalar(len));
-        const nextRadius = currentScale * 0.7;
-        segments.push({
-          start: position.clone(),
-          end: newPos.clone(),
-          radiusBottom: currentScale,
-          radiusTop: nextRadius,
-          hStart: heightFromRoot,
-          hEnd: heightFromRoot + len,
-        });
-        position = newPos;
-        heightFromRoot += len;
-        currentScale = nextRadius;
-        break;
-      }
-      case "+":
-        rotate3D(direction, new THREE.Vector3(0, 0, 1), -angleRad);
-        break;
-      case "-":
-        rotate3D(direction, new THREE.Vector3(0, 0, 1), angleRad);
-        break;
-      case "[": {
-        posStack.push(position.clone());
-        dirStack.push(direction.clone());
-        scaleStack.push(currentScale);
-        heightStack.push(heightFromRoot);
-        currentScale *= decay;
-        break;
-      }
-      case "]": {
-        position = posStack.pop();
-        direction = dirStack.pop();
-        currentScale = scaleStack.pop();
-        heightFromRoot = heightStack.pop();
-        break;
+  // 강제/확률 사이드 브랜치 삽입
+  let out2 = "";
+  let fCount = 0;
+  for (const ch of s) {
+    out2 += ch;
+    if (ch === "F") {
+      fCount++;
+      const forced =
+        api.forceBranchEveryN > 0 && fCount % api.forceBranchEveryN === 0;
+      if (forced || Math.random() < api.branchProb) {
+        out2 += ` [ ${Math.random() < 0.5 ? "R" : "r"} F F B ] `;
       }
     }
   }
-  return segments;
+  return out2;
 }
 
-/* ============ 세그먼트 → 메쉬 (전역높이 고정 그라데이션) ============ */
-function meshesFromSegments(
-  segments,
-  { colorBottom, colorTop, globalMaxHeight }
-) {
-  if (!segments.length) return [];
-  const maxHeight = globalMaxHeight ?? 1;
-  const COLOR_BOTTOM = new THREE.Color(colorBottom);
-  const COLOR_TOP = new THREE.Color(colorTop);
+/* ---------------- 토터스 → 세그먼트 ---------------- */
+function buildSegments(instructions) {
+  const yawStep = deg(api.arcDeg);
+  const pitchStep = deg(api.pitchDeg);
 
-  const list = [];
+  const stack = [];
+  const segments = []; // {start,end,r0,r1,h0,h1}
+  const buds = []; // {pos, r}
+  let pos = new THREE.Vector3(0, 0, 0);
+  let dir = new THREE.Vector3(0, 1, 0);
+  let right = new THREE.Vector3(1, 0, 0);
+  let up = new THREE.Vector3(0, 0, 1);
+  let step = api.step;
+  let rad = api.radius;
+  let hAcc = 0;
+
+  const push = () =>
+    stack.push(new TurtleState(pos, dir, right, up, step, rad, hAcc));
+  const pop = () => {
+    const s = stack.pop();
+    if (!s) return;
+    pos.copy(s.p);
+    dir.copy(s.dir);
+    right.copy(s.right);
+    up.copy(s.up);
+    step = s.step;
+    rad = s.rad;
+    hAcc = s.h;
+  };
+
+  const rotYaw = (a) => {
+    const m = new THREE.Matrix4().makeRotationAxis(up, a);
+    dir.applyMatrix4(m).normalize();
+    right.applyMatrix4(m).normalize();
+  };
+  const rotPitch = (a) => {
+    const m = new THREE.Matrix4().makeRotationAxis(right, a);
+    dir.applyMatrix4(m).normalize();
+    up.applyMatrix4(m).normalize();
+  };
+
+  for (const ch of instructions) {
+    if (ch === "F") {
+      // 다음 위치
+      const len = step;
+      const p1 = pos.clone().addScaledVector(dir, len);
+      // 지터
+      p1.addScaledVector(right, (Math.random() - 0.5) * api.jitter);
+      p1.addScaledVector(up, (Math.random() - 0.5) * api.jitter);
+
+      // 세그먼트(반경 감쇠)
+      const r0 = rad;
+      const r1 = r0 * api.radiusDecay;
+      segments.push({
+        start: pos.clone(),
+        end: p1.clone(),
+        r0,
+        r1,
+        h0: hAcc,
+        h1: hAcc + len,
+      });
+
+      // 상태 갱신
+      pos.copy(p1);
+      hAcc += len;
+      rad = r1;
+      step *= api.stepDecay;
+
+      // 연속 드리프트
+      const drift = yawStep * (Math.random() < 0.5 ? 1 : -1) * api.driftMul;
+      rotYaw(drift);
+
+      // 확률 봉오리: 현재 줄기 반경 기반
+      if (Math.random() < api.budProb)
+        buds.push({
+          pos: pos.clone(),
+          r: Math.max(0.006, rad * api.budRadiusMul),
+        });
+    } else if (ch === "R") rotYaw(yawStep);
+    else if (ch === "r") rotYaw(-yawStep);
+    else if (ch === "U") rotPitch(pitchStep);
+    else if (ch === "D") rotPitch(-pitchStep);
+    else if (ch === "[") {
+      push();
+      step *= api.branchEnterStepMul;
+      rad *= api.branchEnterRadiusMul;
+    } else if (ch === "]") pop();
+    else if (ch === "B")
+      buds.push({
+        pos: pos.clone(),
+        r: Math.max(0.006, rad * api.budRadiusMul),
+      });
+  }
+
+  return { segments, buds, totalHeight: hAcc };
+}
+
+/* ---------------- 세그먼트 → 메쉬 ---------------- */
+function buildMeshes({ segments, buds, totalHeight }) {
+  const group = new THREE.Group();
+
+  // 줄기: 세그먼트별 실린더
+  const colA = new THREE.Color(api.colorBottom);
+  const colB = new THREE.Color(api.colorTop);
+
   for (const s of segments) {
     const dir = new THREE.Vector3().subVectors(s.end, s.start);
     const len = dir.length();
-    const geom = new THREE.CylinderGeometry(
-      s.radiusTop,
-      s.radiusBottom,
+    if (len <= 1e-5) continue;
+
+    const g = new THREE.CylinderGeometry(
+      Math.max(1e-4, s.r1),
+      Math.max(1e-4, s.r0),
       len,
-      24,
+      14,
       1,
       false
     );
 
-    // 전역 기준 그라데이션
-    const pos = geom.attributes.position;
-    const colors = new Float32Array(pos.count * 3);
-    for (let i = 0; i < pos.count; i++) {
-      const yLocal = pos.getY(i);
-      const yWorld = s.hStart + (yLocal + len / 2);
-      const t = THREE.MathUtils.clamp(yWorld / maxHeight, 0, 1);
-      const c = COLOR_BOTTOM.clone().lerp(COLOR_TOP, t);
+    // 그라데이션(전체 높이 기준)
+    const posAttr = g.attributes.position;
+    const colors = new Float32Array(posAttr.count * 3);
+    for (let i = 0; i < posAttr.count; i++) {
+      const yLocal = posAttr.getY(i);
+      const yWorld = s.h0 + (yLocal + len / 2);
+      const t = THREE.MathUtils.clamp(
+        yWorld / Math.max(1e-4, totalHeight),
+        0,
+        1
+      );
+      const c = colA.clone().lerp(colB, t);
       colors[i * 3 + 0] = c.r;
       colors[i * 3 + 1] = c.g;
       colors[i * 3 + 2] = c.b;
     }
-    geom.setAttribute("color", new THREE.BufferAttribute(colors, 3));
+    g.setAttribute("color", new THREE.BufferAttribute(colors, 3));
 
-    const mat = new THREE.MeshStandardMaterial({
-      vertexColors: true,
-      roughness: 0.9,
-      metalness: 0.0,
-    });
-    const mesh = new THREE.Mesh(geom, mat);
-
-    const quat = new THREE.Quaternion();
-    quat.setFromUnitVectors(
+    const m = new THREE.Mesh(
+      g,
+      new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.9 })
+    );
+    const q = new THREE.Quaternion().setFromUnitVectors(
       new THREE.Vector3(0, 1, 0),
       dir.clone().normalize()
     );
-    mesh.applyQuaternion(quat);
-
-    geom.translate(0, len / 2, 0);
-    mesh.position.copy(s.start);
-    mesh.scale.set(1, 0, 1); // 성장 애니메이션용
-    list.push(mesh);
-  }
-  return list;
-}
-
-/* ============ Pane(칸) 구조 ============ */
-class Pane {
-  constructor(preset, idx) {
-    this.preset = preset; // {angleDeg, decay}
-    this.idx = idx;
-
-    // 씬/카메라/조명
-    this.scene = new THREE.Scene();
-    this.camera = new THREE.PerspectiveCamera(70, 1, 0.1, 1000);
-
-    // 가이드(작게)
-    const grid = new THREE.GridHelper(10, 10, 0x88aabb, 0xaad3df);
-    this.scene.add(grid);
-    this.scene.add(new THREE.AmbientLight(0xffffff, 0.55));
-    const dl = new THREE.DirectionalLight(0xffffff, 0.9);
-    dl.position.set(3, 5, 4);
-    this.scene.add(dl);
-
-    // 상태
-    this.allSegments = [];
-    this.stems = [];
-    this.currentSeg = 0;
-    this.growing = null;
-    this.elapsed = 0;
-    this.currentGen = 0;
-    this.playing = true;
-    this.globalMaxHeight = 1;
-
-    // 라벨 DOM
-    this.label = document.createElement("div");
-    this.label.style.position = "absolute";
-    this.label.style.fontSize = "11px";
-    this.label.style.opacity = "0.9";
-    this.label.style.pointerEvents = "none";
-    this.label.textContent = `θ ${preset.angleDeg}°, decay ${preset.decay}`;
-    document.body.appendChild(this.label);
+    m.quaternion.copy(q);
+    g.translate(0, len / 2, 0);
+    m.position.copy(s.start);
+    group.add(m);
   }
 
-  expandForGen(gen) {
-    const s = expand(params.axiom, params.rule, gen);
-    return buildSegments(s, {
-      step: params.step,
-      angleRad: THREE.MathUtils.degToRad(this.preset.angleDeg),
-      decay: this.preset.decay,
-      baseRadius: params.baseRadius,
+  // 봉오리: 줄기 반경 연동
+  if (buds.length) {
+    const unitGeo = new THREE.SphereGeometry(1, 16, 12); // 유닛 구 → 스케일로 반경 반영
+    const bMat = new THREE.MeshStandardMaterial({
+      color: api.budColor,
+      roughness: 0.75,
     });
-  }
-
-  recomputeGlobalMax() {
-    const finalSegs = this.expandForGen(params.genMax);
-    this.globalMaxHeight = finalSegs.length
-      ? finalSegs[finalSegs.length - 1].hEnd
-      : 1;
-  }
-
-  buildGeneration(gen) {
-    // 현재 세대의 전체 세그먼트
-    const segs = this.expandForGen(gen);
-    const newSegs = segs.slice(this.allSegments.length);
-    this.allSegments = segs;
-
-    const newMeshes = meshesFromSegments(newSegs, {
-      colorBottom: params.colorBottom,
-      colorTop: params.colorTop,
-      globalMaxHeight: this.globalMaxHeight,
-    });
-
-    this.stems.push(...newMeshes);
-    for (const m of newMeshes) this.scene.add(m);
-
-    this.currentSeg = this.allSegments.length - newSegs.length;
-    this.growing = null;
-    this.elapsed = 0;
-
-    // 카메라 프레이밍(현재 세대 기준, 세로기준)
-    fitCameraToSegments(this.camera, this.scene, segs, 0.65);
-  }
-}
-
-/* ============ 비교 panes 생성 ============ */
-const PANES = PRESETS.map((p, i) => new Pane(p, i));
-
-// 전역 HUD
-function updateHUD() {
-  hud.innerHTML = `Compare: ${GRID.cols}×${GRID.rows} — GenMax ${params.genMax}
-  <br>Space: 재생/일시정지  &nbsp;[/ ]: 세대수 ↓/↑`;
-}
-
-function getBoundsFromSegments(segs) {
-  const min = new THREE.Vector3(Infinity, Infinity, Infinity);
-  const max = new THREE.Vector3(-Infinity, -Infinity, -Infinity);
-  for (const s of segs) {
-    min.min(s.start);
-    min.min(s.end);
-    max.max(s.start);
-    max.max(s.end);
-  }
-  return { min, max };
-}
-
-function mergeBounds(a, b) {
-  return { min: a.min.clone().min(b.min), max: a.max.clone().max(b.max) };
-}
-
-function expandFor(preset, genMax) {
-  const s = expand(params.axiom, params.rule, genMax);
-  return buildSegments(s, {
-    step: params.step,
-    angleRad: THREE.MathUtils.degToRad(preset.angleDeg),
-    decay: preset.decay,
-    baseRadius: params.baseRadius,
-  });
-}
-
-// 모두 리셋 & 재빌드
-function resetAll() {
-  for (const pane of PANES) {
-    // 씬에서 기존 줄기 제거
-    for (const m of pane.stems) pane.scene.remove(m);
-    pane.stems = [];
-    pane.allSegments = [];
-    pane.currentSeg = 0;
-    pane.growing = null;
-    pane.elapsed = 0;
-    pane.currentGen = 0;
-    pane.playing = true;
-    pane.recomputeGlobalMax();
-    pane.buildGeneration(0);
-  }
-  updateHUD();
-}
-resetAll();
-
-/* ============ 루프 ============ */
-const clock = new THREE.Clock();
-function animate() {
-  requestAnimationFrame(animate);
-  const delta = clock.getDelta();
-
-  const w = innerWidth,
-    h = innerHeight;
-  const cellW = Math.floor(w / GRID.cols);
-  const cellH = Math.floor(h / GRID.rows);
-
-  for (let r = 0; r < GRID.rows; r++) {
-    for (let c = 0; c < GRID.cols; c++) {
-      const i = r * GRID.cols + c;
-      const pane = PANES[i];
-      if (!pane) continue;
-
-      // 성장 애니메이션
-      if (pane.growing) {
-        pane.elapsed += delta;
-        const t = Math.min(pane.elapsed / params.growDuration, 1.0);
-        pane.growing.scale.y = t;
-        if (t >= 1.0) {
-          pane.growing = null;
-          pane.elapsed = 0;
-        }
-      }
-      if (!pane.growing && pane.currentSeg < pane.stems.length) {
-        pane.growing = pane.stems[pane.currentSeg];
-        pane.currentSeg++;
-      }
-      if (
-        pane.playing &&
-        !pane.growing &&
-        pane.currentSeg >= pane.stems.length
-      ) {
-        if (pane.currentGen < params.genMax) {
-          pane.currentGen++;
-          pane.buildGeneration(pane.currentGen);
-        } else {
-          pane.playing = false;
-        }
-      }
-
-      // 뷰포트/시저/렌더
-      const x = c * cellW;
-      const y = h - (r + 1) * cellH; // WebGL 하단 원점
-      pane.camera.aspect = cellW / cellH;
-      pane.camera.updateProjectionMatrix();
-
-      renderer.setViewport(x, y, cellW, cellH);
-      renderer.setScissor(x, y, cellW, cellH);
-      renderer.render(pane.scene, pane.camera);
-
-      // 라벨 위치
-      pane.label.style.left = `${x + 8}px`;
-      pane.label.style.top = `${r * cellH + 8}px`;
+    for (const b of buds) {
+      const bm = new THREE.Mesh(unitGeo, bMat);
+      bm.position.copy(b.pos);
+      bm.scale.setScalar(b.r); // ← 여기서 크기 연동!
+      group.add(bm);
     }
   }
-}
-animate();
 
-/* ============ 프레이밍 유틸(세로 기준) ============ */
-function fitCameraToSegments(cam, scn, segs, padding = 1.0) {
-  if (!segs.length) return;
-  const min = new THREE.Vector3(Infinity, Infinity, Infinity);
-  const max = new THREE.Vector3(-Infinity, -Infinity, -Infinity);
-  for (const s of segs) {
-    min.min(s.start);
-    min.min(s.end);
-    max.max(s.start);
-    max.max(s.end);
-  }
-
-  const radiusMargin = Math.max(params.baseRadius, params.step * 0.5);
-  min.addScalar(-radiusMargin);
-  max.addScalar(+radiusMargin);
-
-  const box = new THREE.Box3(min, max);
-  const size = box.getSize(new THREE.Vector3());
-  const center = box.getCenter(new THREE.Vector3());
-
-  const vFov = THREE.MathUtils.degToRad(cam.fov);
-  const halfHeight = size.y * 0.5 * padding;
-  const dist = halfHeight / Math.tan(vFov / 2);
-
-  // 시선 방향(기본값)
-  const dir = new THREE.Vector3(1, 1, 2).normalize();
-  cam.position.copy(center).add(dir.multiplyScalar(dist));
-
-  const target = center.clone();
-  target.y -= size.y * 0.15;
-  cam.near = Math.max(0.01, dist / 100);
-  cam.far = dist * 10 + size.length() * 2;
-  cam.lookAt(target);
+  return group;
 }
 
-/* ============ 리사이즈/키 ============ */
-addEventListener("resize", () => {
-  renderer.setSize(innerWidth, innerHeight);
-  updateHUD();
-});
+/* ---------------- 공개 API ---------------- */
+export function createWeirdPlantRoot(opts = {}) {
+  Object.assign(api, opts);
+  if (_root && _root.parent) _root.parent.remove(_root);
+  _root = new THREE.Group();
+  _root.name = "WeirdPlantRoot";
 
-addEventListener("keydown", (e) => {
-  if (e.key === " ") {
-    // 전체 재생/정지 토글
-    for (const p of PANES) p.playing = !p.playing;
-  } else if (e.key === "[") {
-    params.genMax = Math.max(0, params.genMax - 1);
-    resetAll();
-  } else if (e.key === "]") {
-    params.genMax = Math.min(6, params.genMax + 1);
-    resetAll();
-  }
-});
+  const instr = expand("UXRFX", api.genMax);
+  const data = buildSegments(instr);
+  const plant = buildMeshes(data);
+
+  plant.scale.setScalar(api.plantScale); // ← 전체 스케일업
+  _root.add(plant);
+
+  _root.rotation.y = Math.random() * Math.PI * 2;
+  return _root;
+}
+
+export function updateWeirdPlant(dt) {
+  if (!_root) return;
+  _t += dt * api.swayFreq;
+  const s = Math.sin(_t) * api.swayAmp;
+  const c = Math.cos(_t * 0.8) * api.swayAmp * 0.6;
+  _root.rotation.z = s * 0.35;
+  _root.rotation.x = c * 0.25;
+}

@@ -1,6 +1,7 @@
 // src/character.js
 import * as THREE from "three";
 import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
+import { recalcCharacterFootprint } from "./movement.js";
 
 // ----- Export: 즉시 사용 가능한 placeholder -----
 export const characterRoot = new THREE.Group();
@@ -56,10 +57,29 @@ loader.load(
 
       // 스케일 반영 후 다시 계산
       model.updateMatrixWorld(true);
+
+      // ✅ 피벗 정렬: '앵커 비율' 지점이 y=0에 오도록
+      // 0.0 = 최하단, 1.0 = 최상단 (해파리면 0.25~0.35 권장)
+      const ANCHOR_RATIO = 0.3;
+
+      // 스케일 반영 후 바운딩 박스 재계산
       const box2 = new THREE.Box3().setFromObject(model);
-      const min2 = box2.min.clone();
-      // 2) 피벗 정렬: 발바닥이 y=0에 오도록
-      model.position.y -= min2.y;
+      const minY = box2.min.y;
+      const maxY = box2.max.y;
+      const anchorY = THREE.MathUtils.lerp(minY, maxY, ANCHOR_RATIO);
+
+      model.position.y -= anchorY;
+
+      // ✅ pivot 아래로 내려온 메시 길이(최저점까지) 저장 → 바닥 관통 방지용 보정
+      const footClearance = anchorY - minY; // (앵커지점 y) - (최저점 y)
+      characterRoot.userData.footClearance = footClearance;
+
+      // ✅ 접지 반경 저장: movement.js에서 표면 멀티샘플링에 사용
+      const sizeX = box2.max.x - box2.min.x;
+      const sizeZ = box2.max.z - box2.min.z;
+      const sizeXZ = Math.max(sizeX, sizeZ);
+      // 반지름 = 가로/세로 중 큰 쪽의 절반에 여유 0.6 배
+      characterRoot.userData.groundRadius = 0.5 * sizeXZ * 0.6;
 
       // 3) RD 머티리얼 적용
       applyRDMaterial(model, rdTexture);

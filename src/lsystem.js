@@ -1,56 +1,41 @@
 import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 
-// 기본 세팅
+/* ============ 공통 세팅 ============ */
 const hud = document.getElementById("hud");
-
 const renderer = new THREE.WebGLRenderer({ antialias: true });
 renderer.setSize(innerWidth, innerHeight);
 renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setScissorTest(true); // ← 멀티 뷰포트
 document.body.appendChild(renderer.domElement);
 
-const scene = new THREE.Scene();
+let GLOBAL_COMPARE_BOUNDS = null; // {min, max}
 
-const camera = new THREE.PerspectiveCamera(
-  70, // 가까운 프레이밍
-  innerWidth / innerHeight,
-  0.1,
-  1000
-);
-camera.position.set(4, 3, 8);
+// 비교 프리셋 (2 × 3)
+const PRESETS = [
+  { angleDeg: 10, decay: 0.95 },
+  { angleDeg: 25, decay: 0.95 },
+  { angleDeg: 40, decay: 0.95 },
+  { angleDeg: 10, decay: 0.6 },
+  { angleDeg: 25, decay: 0.6 },
+  { angleDeg: 40, decay: 0.6 },
+];
+const GRID = { cols: 3, rows: 2 };
 
-const controls = new OrbitControls(camera, renderer.domElement);
-controls.enableDamping = true;
-
-let advanceTimer = null; // 다음 세대 예약 타이머
-let allSegments = []; // 누적 세그먼트
-let globalMaxHeightConst = 1; // ▶모든 색 계산에 쓰는 '고정' 전역최대높이
-
-// 가이드
-scene.add(new THREE.AxesHelper(2));
-scene.add(new THREE.GridHelper(10, 10, 0x88aabb, 0xaad3df));
-
-scene.add(new THREE.AmbientLight(0xffffff, 0.55));
-const dirLight = new THREE.DirectionalLight(0xffffff, 0.9);
-dirLight.position.set(3, 5, 4);
-scene.add(dirLight);
-
-// 파라미터
+/* 전역 파라미터: 규칙/세대/길이/색 */
 const params = {
   axiom: "F",
   rule: { F: "F[+F]F[-F]F" },
-  genMax: 2, // 0~2세대 (원하는 값으로 조절)
+  genMax: 2, // 0~2세대
   step: 1.0,
-  angleDeg: 25,
-  decay: 0.7,
   baseRadius: 0.12,
-  growDuration: 0.8,
+  growDuration: 0.8, // 세그먼트 하나 성장 시간
   colorBottom: 0x2e7d32,
   colorTop: 0x1e3a8a,
 };
 
-/* 유틸: 규칙 확장/파싱 */
-// F[+F]F[-F]F [ + F[+F]F[-F]F ] F[+F]F[-F]F [ - F[+F]F[-F]F ] F[+F]F[-F]F
+/* ============ 문자열 확장/세그먼트 생성 ============ */
+// 2세대 문자열 예시: F[+F]F[-F]F [ + F[+F]F[-F]F ] F[+F]F[-F]F [ - F[+F]F[-F]F ] F[+F]F[-F]F
 function expand(axiom, rule, iterations) {
   let s = axiom;
   for (let i = 0; i < iterations; i++) {
@@ -72,9 +57,8 @@ function buildSegments(instructions, { step, angleRad, decay, baseRadius }) {
   let heightFromRoot = 0;
 
   const segments = [];
-
-  const rotate3D = (dir, axis, radians) => {
-    const m = new THREE.Matrix4().makeRotationAxis(axis, radians);
+  const rotate3D = (dir, axis, rad) => {
+    const m = new THREE.Matrix4().makeRotationAxis(axis, rad);
     dir.applyMatrix4(m).normalize();
   };
 
@@ -125,14 +109,13 @@ function buildSegments(instructions, { step, angleRad, decay, baseRadius }) {
   return segments;
 }
 
-// 세그먼트 → 메쉬
+/* ============ 세그먼트 → 메쉬 (전역높이 고정 그라데이션) ============ */
 function meshesFromSegments(
   segments,
   { colorBottom, colorTop, globalMaxHeight }
 ) {
   if (!segments.length) return [];
   const maxHeight = globalMaxHeight ?? 1;
-
   const COLOR_BOTTOM = new THREE.Color(colorBottom);
   const COLOR_TOP = new THREE.Color(colorTop);
 
@@ -140,7 +123,6 @@ function meshesFromSegments(
   for (const s of segments) {
     const dir = new THREE.Vector3().subVectors(s.end, s.start);
     const len = dir.length();
-
     const geom = new THREE.CylinderGeometry(
       s.radiusTop,
       s.radiusBottom,
@@ -150,7 +132,7 @@ function meshesFromSegments(
       false
     );
 
-    // 전역고정 기준 그라데이션
+    // 전역 기준 그라데이션
     const pos = geom.attributes.position;
     const colors = new Float32Array(pos.count * 3);
     for (let i = 0; i < pos.count; i++) {
@@ -180,134 +162,210 @@ function meshesFromSegments(
 
     geom.translate(0, len / 2, 0);
     mesh.position.copy(s.start);
-    mesh.scale.set(1, 0, 1);
-
+    mesh.scale.set(1, 0, 1); // 성장 애니메이션용
     list.push(mesh);
   }
   return list;
 }
 
-// 시퀀스 엔진
-let stems = [];
-let currentSeg = 0;
-let growing = null;
-let elapsed = 0;
+/* ============ Pane(칸) 구조 ============ */
+class Pane {
+  constructor(preset, idx) {
+    this.preset = preset; // {angleDeg, decay}
+    this.idx = idx;
 
-let currentGen = 0;
-let playing = true;
+    // 씬/카메라/조명
+    this.scene = new THREE.Scene();
+    this.camera = new THREE.PerspectiveCamera(70, 1, 0.1, 1000);
 
-const clock = new THREE.Clock();
+    // 가이드(작게)
+    const grid = new THREE.GridHelper(10, 10, 0x88aabb, 0xaad3df);
+    this.scene.add(grid);
+    this.scene.add(new THREE.AmbientLight(0xffffff, 0.55));
+    const dl = new THREE.DirectionalLight(0xffffff, 0.9);
+    dl.position.set(3, 5, 4);
+    this.scene.add(dl);
 
-function getSegmentsForGen(gen) {
-  const s = expand(params.axiom, params.rule, gen);
-  return buildSegments(s, {
-    step: params.step,
-    angleRad: THREE.MathUtils.degToRad(params.angleDeg),
-    decay: params.decay,
-    baseRadius: params.baseRadius,
-  });
-}
+    // 상태
+    this.allSegments = [];
+    this.stems = [];
+    this.currentSeg = 0;
+    this.growing = null;
+    this.elapsed = 0;
+    this.currentGen = 0;
+    this.playing = true;
+    this.globalMaxHeight = 1;
 
-// 전역최대높이 재계산 (genMax/각도/감쇠 등 바뀔 때 호출)
-function recomputeGlobalMax() {
-  const finalSegs = getSegmentsForGen(params.genMax);
-  globalMaxHeightConst = finalSegs.length
-    ? finalSegs[finalSegs.length - 1].hEnd
-    : 1;
-}
-
-function buildGeneration(gen) {
-  if (advanceTimer) {
-    clearTimeout(advanceTimer);
-    advanceTimer = null;
+    // 라벨 DOM
+    this.label = document.createElement("div");
+    this.label.style.position = "absolute";
+    this.label.style.fontSize = "11px";
+    this.label.style.opacity = "0.9";
+    this.label.style.pointerEvents = "none";
+    this.label.textContent = `θ ${preset.angleDeg}°, decay ${preset.decay}`;
+    document.body.appendChild(this.label);
   }
 
-  const str = expand(params.axiom, params.rule, gen);
-  const segs = buildSegments(str, {
+  expandForGen(gen) {
+    const s = expand(params.axiom, params.rule, gen);
+    return buildSegments(s, {
+      step: params.step,
+      angleRad: THREE.MathUtils.degToRad(this.preset.angleDeg),
+      decay: this.preset.decay,
+      baseRadius: params.baseRadius,
+    });
+  }
+
+  recomputeGlobalMax() {
+    const finalSegs = this.expandForGen(params.genMax);
+    this.globalMaxHeight = finalSegs.length
+      ? finalSegs[finalSegs.length - 1].hEnd
+      : 1;
+  }
+
+  buildGeneration(gen) {
+    // 현재 세대의 전체 세그먼트
+    const segs = this.expandForGen(gen);
+    const newSegs = segs.slice(this.allSegments.length);
+    this.allSegments = segs;
+
+    const newMeshes = meshesFromSegments(newSegs, {
+      colorBottom: params.colorBottom,
+      colorTop: params.colorTop,
+      globalMaxHeight: this.globalMaxHeight,
+    });
+
+    this.stems.push(...newMeshes);
+    for (const m of newMeshes) this.scene.add(m);
+
+    this.currentSeg = this.allSegments.length - newSegs.length;
+    this.growing = null;
+    this.elapsed = 0;
+
+    // 카메라 프레이밍(현재 세대 기준, 세로기준)
+    fitCameraToSegments(this.camera, this.scene, segs, 0.65);
+  }
+}
+
+/* ============ 비교 panes 생성 ============ */
+const PANES = PRESETS.map((p, i) => new Pane(p, i));
+
+// 전역 HUD
+function updateHUD() {
+  hud.innerHTML = `Compare: ${GRID.cols}×${GRID.rows} — GenMax ${params.genMax}
+  <br>Space: 재생/일시정지  &nbsp;[/ ]: 세대수 ↓/↑`;
+}
+
+function getBoundsFromSegments(segs) {
+  const min = new THREE.Vector3(Infinity, Infinity, Infinity);
+  const max = new THREE.Vector3(-Infinity, -Infinity, -Infinity);
+  for (const s of segs) {
+    min.min(s.start);
+    min.min(s.end);
+    max.max(s.start);
+    max.max(s.end);
+  }
+  return { min, max };
+}
+
+function mergeBounds(a, b) {
+  return { min: a.min.clone().min(b.min), max: a.max.clone().max(b.max) };
+}
+
+function expandFor(preset, genMax) {
+  const s = expand(params.axiom, params.rule, genMax);
+  return buildSegments(s, {
     step: params.step,
-    angleRad: THREE.MathUtils.degToRad(params.angleDeg),
-    decay: params.decay,
+    angleRad: THREE.MathUtils.degToRad(preset.angleDeg),
+    decay: preset.decay,
     baseRadius: params.baseRadius,
   });
-
-  // 새로 생긴 조각만 추가
-  const newSegs = segs.slice(allSegments.length);
-  allSegments = segs;
-
-  const newMeshes = meshesFromSegments(newSegs, {
-    colorBottom: params.colorBottom,
-    colorTop: params.colorTop,
-    globalMaxHeight: globalMaxHeightConst, // 항상 고정 기준
-  });
-
-  stems.push(...newMeshes);
-  for (const m of newMeshes) scene.add(m);
-
-  currentSeg = allSegments.length - newSegs.length;
-  growing = null;
-  elapsed = 0;
-
-  fitCameraToSegments(segs, 0.65);
-  updateHUD(gen, str, allSegments.length);
 }
 
-function updateHUD(gen, str, segCount) {
-  const ruleDisp = str.length > 80 ? str.slice(0, 77) + "..." : str;
-  hud.innerHTML = `
-    <div><b>Generation</b> ${gen} / ${params.genMax}</div>
-    <div><b>Angle</b> ${params.angleDeg}°, <b>Decay</b> ${params.decay}</div>
-    <div><b>Segments</b> ${segCount}</div>
-    <div style="opacity:.8"><code>${ruleDisp}</code></div>
-    <div style="margin-top:6px;opacity:.8">Space: 재생/일시정지 • ←/→: 세대 이동 • J/K: 각도 • N/M: 감쇠</div>
-  `;
+// 모두 리셋 & 재빌드
+function resetAll() {
+  for (const pane of PANES) {
+    // 씬에서 기존 줄기 제거
+    for (const m of pane.stems) pane.scene.remove(m);
+    pane.stems = [];
+    pane.allSegments = [];
+    pane.currentSeg = 0;
+    pane.growing = null;
+    pane.elapsed = 0;
+    pane.currentGen = 0;
+    pane.playing = true;
+    pane.recomputeGlobalMax();
+    pane.buildGeneration(0);
+  }
+  updateHUD();
 }
+resetAll();
 
-// 초기 빌드 & 루프
-recomputeGlobalMax(); // 먼저 고정 기준 계산
-buildGeneration(currentGen);
-
+/* ============ 루프 ============ */
+const clock = new THREE.Clock();
 function animate() {
   requestAnimationFrame(animate);
   const delta = clock.getDelta();
 
-  if (growing) {
-    elapsed += delta;
-    const t = Math.min(elapsed / params.growDuration, 1.0);
-    growing.scale.y = t;
-    if (t >= 1.0) {
-      growing = null;
-      elapsed = 0;
-    }
-  }
+  const w = innerWidth,
+    h = innerHeight;
+  const cellW = Math.floor(w / GRID.cols);
+  const cellH = Math.floor(h / GRID.rows);
 
-  if (!growing && currentSeg < stems.length) {
-    growing = stems[currentSeg];
-    currentSeg++;
-  }
+  for (let r = 0; r < GRID.rows; r++) {
+    for (let c = 0; c < GRID.cols; c++) {
+      const i = r * GRID.cols + c;
+      const pane = PANES[i];
+      if (!pane) continue;
 
-  if (playing && !growing && currentSeg >= stems.length) {
-    if (currentGen < params.genMax) {
-      if (!advanceTimer) {
-        advanceTimer = setTimeout(() => {
-          advanceTimer = null;
-          currentGen++;
-          buildGeneration(currentGen);
-        }, 300);
+      // 성장 애니메이션
+      if (pane.growing) {
+        pane.elapsed += delta;
+        const t = Math.min(pane.elapsed / params.growDuration, 1.0);
+        pane.growing.scale.y = t;
+        if (t >= 1.0) {
+          pane.growing = null;
+          pane.elapsed = 0;
+        }
       }
-    } else {
-      playing = false;
+      if (!pane.growing && pane.currentSeg < pane.stems.length) {
+        pane.growing = pane.stems[pane.currentSeg];
+        pane.currentSeg++;
+      }
+      if (
+        pane.playing &&
+        !pane.growing &&
+        pane.currentSeg >= pane.stems.length
+      ) {
+        if (pane.currentGen < params.genMax) {
+          pane.currentGen++;
+          pane.buildGeneration(pane.currentGen);
+        } else {
+          pane.playing = false;
+        }
+      }
+
+      // 뷰포트/시저/렌더
+      const x = c * cellW;
+      const y = h - (r + 1) * cellH; // WebGL 하단 원점
+      pane.camera.aspect = cellW / cellH;
+      pane.camera.updateProjectionMatrix();
+
+      renderer.setViewport(x, y, cellW, cellH);
+      renderer.setScissor(x, y, cellW, cellH);
+      renderer.render(pane.scene, pane.camera);
+
+      // 라벨 위치
+      pane.label.style.left = `${x + 8}px`;
+      pane.label.style.top = `${r * cellH + 8}px`;
     }
   }
-
-  controls.update();
-  renderer.render(scene, camera);
 }
 animate();
 
-// 프레이밍
-function fitCameraToSegments(segs, padding = 1.0) {
+/* ============ 프레이밍 유틸(세로 기준) ============ */
+function fitCameraToSegments(cam, scn, segs, padding = 1.0) {
   if (!segs.length) return;
-
   const min = new THREE.Vector3(Infinity, Infinity, Infinity);
   const max = new THREE.Vector3(-Infinity, -Infinity, -Infinity);
   for (const s of segs) {
@@ -325,108 +383,36 @@ function fitCameraToSegments(segs, padding = 1.0) {
   const size = box.getSize(new THREE.Vector3());
   const center = box.getCenter(new THREE.Vector3());
 
-  const vFov = THREE.MathUtils.degToRad(camera.fov);
+  const vFov = THREE.MathUtils.degToRad(cam.fov);
   const halfHeight = size.y * 0.5 * padding;
   const dist = halfHeight / Math.tan(vFov / 2);
 
-  const dir = new THREE.Vector3()
-    .subVectors(camera.position, controls.target)
-    .normalize();
-  if (!isFinite(dir.lengthSq()) || dir.lengthSq() === 0)
-    dir.set(1, 1, 2).normalize();
+  // 시선 방향(기본값)
+  const dir = new THREE.Vector3(1, 1, 2).normalize();
+  cam.position.copy(center).add(dir.multiplyScalar(dist));
 
-  camera.position.copy(center).add(dir.multiplyScalar(dist));
-
-  const targetOffset = center.clone();
-  targetOffset.y -= size.y * 0.15;
-  controls.target.copy(targetOffset);
-
-  camera.near = Math.max(0.01, dist / 100);
-  camera.far = dist * 10 + size.length() * 2;
-  camera.updateProjectionMatrix();
-  controls.update();
+  const target = center.clone();
+  target.y -= size.y * 0.15;
+  cam.near = Math.max(0.01, dist / 100);
+  cam.far = dist * 10 + size.length() * 2;
+  cam.lookAt(target);
 }
 
-// 인터랙션
+/* ============ 리사이즈/키 ============ */
 addEventListener("resize", () => {
-  camera.aspect = innerWidth / innerHeight;
-  camera.updateProjectionMatrix();
   renderer.setSize(innerWidth, innerHeight);
+  updateHUD();
 });
-
-addEventListener(
-  "pointerdown",
-  () => {
-    const bgm = document.getElementById("bgm");
-    if (bgm && bgm.muted) bgm.muted = false;
-  },
-  { once: true }
-);
 
 addEventListener("keydown", (e) => {
-  switch (e.key) {
-    case " ":
-      playing = !playing;
-      break;
-    case "ArrowRight":
-      playing = false;
-      if (currentGen < params.genMax) {
-        currentGen++;
-        buildGeneration(currentGen);
-      }
-      break;
-    case "ArrowLeft":
-      playing = false;
-      if (currentGen > 0) {
-        currentGen--;
-        // 뒤 세대 제거
-        const targetSegs = getSegmentsForGen(currentGen);
-        const removeCount = allSegments.length - targetSegs.length;
-        for (let i = 0; i < removeCount; i++) {
-          const mesh = stems.pop();
-          if (mesh) scene.remove(mesh);
-        }
-        allSegments = targetSegs;
-        // 전역고정 기준은 genMax 기준이므로 그대로 사용
-        buildGeneration(currentGen);
-      }
-      break;
-    case "j":
-      params.angleDeg = Math.max(5, params.angleDeg - 5);
-      resetAndReframe();
-      break;
-    case "k":
-      params.angleDeg = Math.min(75, params.angleDeg + 5);
-      resetAndReframe();
-      break;
-    case "n":
-      params.decay = Math.min(0.95, +(params.decay + 0.05).toFixed(2));
-      resetAndReframe();
-      break;
-    case "m":
-      params.decay = Math.max(0.4, +(params.decay - 0.05).toFixed(2));
-      resetAndReframe();
-      break;
-    case "[":
-      params.genMax = Math.max(0, params.genMax - 1);
-      resetAndReframe();
-      break;
-    case "]":
-      params.genMax = Math.min(6, params.genMax + 1);
-      resetAndReframe();
-      break;
+  if (e.key === " ") {
+    // 전체 재생/정지 토글
+    for (const p of PANES) p.playing = !p.playing;
+  } else if (e.key === "[") {
+    params.genMax = Math.max(0, params.genMax - 1);
+    resetAll();
+  } else if (e.key === "]") {
+    params.genMax = Math.min(6, params.genMax + 1);
+    resetAll();
   }
 });
-
-// 파라미터 변경 시: 전역최대높이 재계산 + 전체 리셋
-function resetAndReframe() {
-  for (const m of stems) scene.remove(m);
-  stems = [];
-  allSegments = [];
-  currentSeg = 0;
-  growing = null;
-  elapsed = 0;
-  recomputeGlobalMax(); // 새 파라미터 기준으로 고정값 갱신
-  currentGen = Math.min(currentGen, params.genMax);
-  buildGeneration(currentGen);
-}

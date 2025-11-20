@@ -309,11 +309,10 @@ export function updateWeirdPlant(dt) {
   _swayNode.rotation.x = c * 0.25;
 }
 
-// 🔹 L-system 식물용 꽃가루 파티클 emitter 생성 (apex 기준, 버스트형)
+// 🔹 L-system 식물용 꽃가루 파티클 emitter 생성 (apex 기준, 파동형 분출)
 function attachPlantParticles(root, options = {}) {
-  const count = options.count ?? 80; // 파티클 개수
+  const count = options.count ?? 80; // 파티클 풀 전체 개수
   const spread = options.spread ?? 0.18; // apex 주변 퍼지는 정도
-  const riseHeight = options.riseHeight ?? 1.2;
   const apex = options.apex ?? new THREE.Vector3(0, 1, 0); // root 로컬 기준 apex 위치
 
   const positions = new Float32Array(count * 3);
@@ -321,7 +320,7 @@ function attachPlantParticles(root, options = {}) {
   const lifetimes = new Float32Array(count);
   const maxLifetimes = new Float32Array(count);
 
-  // 일단 "죽어 있는 상태"로 초기화 (lifetimes를 아주 큰 값으로)
+  // 처음엔 모든 파티클 비활성 상태(lifetimes < 0)
   for (let i = 0; i < count; i++) {
     positions[i * 3 + 0] = apex.x;
     positions[i * 3 + 1] = apex.y;
@@ -331,8 +330,8 @@ function attachPlantParticles(root, options = {}) {
     velocities[i * 3 + 1] = 0;
     velocities[i * 3 + 2] = 0;
 
-    lifetimes[i] = 9999;
-    maxLifetimes[i] = 1;
+    lifetimes[i] = -1; // 비활성 표시
+    maxLifetimes[i] = 1; // 의미 없음, 나중에 세팅
   }
 
   const geo = new THREE.BufferGeometry();
@@ -341,7 +340,7 @@ function attachPlantParticles(root, options = {}) {
 
   const mat = new THREE.PointsMaterial({
     color: 0xfff7e6,
-    size: 0.05,
+    size: 0.06, // 조금 더 크게
     sizeAttenuation: true,
     transparent: true,
     opacity: 0.0, // 처음엔 안 보이게
@@ -357,10 +356,13 @@ function attachPlantParticles(root, options = {}) {
 
   root.add(emitter);
 
-  const burstIntervalMin = options.burstIntervalMin ?? 2.0;
-  const burstIntervalMax = options.burstIntervalMax ?? 6.0;
+  // 중력/물 높이
   const gravity = options.gravity ?? -0.8;
   const waterLevel = options.waterLevel ?? 0;
+
+  // 🔹 파동형 분출 컨트롤 (sin 기반)
+  const waveFreq = options.waveFreq ?? 0.3 + Math.random() * 0.2; // 0.3~0.5 Hz
+  const baseSpawnRate = options.spawnRate ?? 18; // 최대 분출 강도
 
   root.userData.particles = {
     emitter,
@@ -371,18 +373,15 @@ function attachPlantParticles(root, options = {}) {
     maxLifetimes,
     apex: apex.clone(),
     spread,
-    riseHeight,
     count,
     time: Math.random() * 10,
     material: mat,
 
-    // 🔹 버스트 제어
-    burstTimer: 0.0, // ✅ 처음에는 바로 버스트 발생
-    burstIntervalMin,
-    burstIntervalMax,
     gravity,
     waterLevel,
-    active: false,
+
+    waveFreq,
+    baseSpawnRate,
   };
 }
 
@@ -455,7 +454,7 @@ export function updateWeirdPlantInstance(root, dt) {
     s.node.rotation.x = x;
   }
 
-  // 2) 꽃가루 파티클 (버스트형)
+  // 2) 꽃가루 파티클 (파동형 분출 → 낙하 → 사라짐)
   const pData = root.userData.particles;
   if (!pData) return;
 
@@ -467,120 +466,120 @@ export function updateWeirdPlantInstance(root, dt) {
     maxLifetimes,
     apex,
     spread,
-    riseHeight,
     count,
     material,
     gravity,
     waterLevel,
+    waveFreq,
+    baseSpawnRate,
   } = pData;
 
   const posAttr = geo.getAttribute("position");
   pData.time += dt;
 
-  // --- 2-1) 버스트 타이머 갱신 ---
-  if (!pData.active) {
-    pData.burstTimer -= dt;
-    if (pData.burstTimer <= 0) {
-      // 🔥 새 버스트 시작: 모든 파티클을 apex 주변에서 spawn
-      for (let i = 0; i < count; i++) {
-        const i3 = i * 3;
+  // 🔹 2-1) 파동값 계산: 0 ~ 1
+  //   → 0 근처엔 거의 안 나오고, 1 근처에서 가장 많이 뿜음
+  const wave = 0.5 * (1 + Math.sin(pData.time * waveFreq * Math.PI * 2)); // 0~1
+  const spawnRate = baseSpawnRate * wave * wave; // 곡선을 좀 더 뾰족하게
 
-        const angle = Math.random() * Math.PI * 2;
-        const r = Math.random() * spread;
+  // opacity도 wave에 맞춰 부드럽게
+  const targetOpacity = wave * 0.9;
+  material.opacity += (targetOpacity - material.opacity) * Math.min(1, dt * 4);
+  material.needsUpdate = true;
 
-        const ox = Math.cos(angle) * r;
-        const oz = Math.sin(angle) * r;
-        const oy = (Math.random() - 0.5) * spread * 0.4;
+  // 🔹 2-2) 기존 파티클 업데이트 (중력 + 낙하 + 사라짐)
+  for (let i = 0; i < count; i++) {
+    const i3 = i * 3;
+    const life = lifetimes[i];
 
-        let x = apex.x + ox;
-        let y = apex.y + oy;
-        let z = apex.z + oz;
+    if (life >= 0) {
+      // 활성 파티클만 업데이트
+      let x = positions[i3 + 0];
+      let y = positions[i3 + 1];
+      let z = positions[i3 + 2];
 
-        positions[i3 + 0] = x;
-        positions[i3 + 1] = y;
-        positions[i3 + 2] = z;
+      let vx = velocities[i3 + 0];
+      let vy = velocities[i3 + 1];
+      let vz = velocities[i3 + 2];
 
-        // 처음엔 살짝 위로 튀어나왔다가 → 곧 중력 받아서 아래로 떨어짐
-        velocities[i3 + 0] = (Math.random() - 0.5) * 0.3;
-        velocities[i3 + 1] = 0.6 + Math.random() * 0.4; // 초기 위쪽 속도
-        velocities[i3 + 2] = (Math.random() - 0.5) * 0.3;
+      // 중력 적용
+      vy += gravity * dt;
 
-        const life = 1.0 + Math.random() * 1.3; // 1~2.3초 사이 수명
-        lifetimes[i] = 0;
-        maxLifetimes[i] = life;
+      // 이동
+      x += vx * dt;
+      y += vy * dt;
+      z += vz * dt;
+
+      lifetimes[i] += dt;
+
+      const fellIntoWater = y < waterLevel - 0.2;
+      const dead = lifetimes[i] > maxLifetimes[i];
+
+      if (fellIntoWater || dead) {
+        // 비활성 상태로 돌려놓기
+        lifetimes[i] = -1;
+        positions[i3 + 0] = apex.x;
+        positions[i3 + 1] = waterLevel - 10;
+        positions[i3 + 2] = apex.z;
+        velocities[i3 + 0] = 0;
+        velocities[i3 + 1] = 0;
+        velocities[i3 + 2] = 0;
+        continue;
       }
 
-      pData.active = true;
-      // 버스트 시작하면 보이게
-      material.opacity = 0.85;
-      material.needsUpdate = true;
-    } else {
-      // 아직 버스트 전이면 그냥 return (아무 것도 안 보이게)
-      return;
+      positions[i3 + 0] = x;
+      positions[i3 + 1] = y;
+      positions[i3 + 2] = z;
+
+      velocities[i3 + 0] = vx;
+      velocities[i3 + 1] = vy;
+      velocities[i3 + 2] = vz;
     }
   }
 
-  // --- 2-2) 버스트 진행 중: 파티클 물리 업데이트 ---
-  let aliveCount = 0;
+  // 🔹 2-3) 새 파티클 spawn: "없다가 점차 생겨남"
+  // spawnRate = 초당 평균 몇 개 뿜을지
+  const expectedNew = spawnRate * dt;
+  let newToSpawn = Math.floor(expectedNew);
+  // fractional part 확률로 하나 더
+  if (Math.random() < expectedNew - newToSpawn) newToSpawn++;
 
-  for (let i = 0; i < count; i++) {
-    const i3 = i * 3;
-
-    let x = positions[i3 + 0];
-    let y = positions[i3 + 1];
-    let z = positions[i3 + 2];
-
-    let vx = velocities[i3 + 0];
-    let vy = velocities[i3 + 1];
-    let vz = velocities[i3 + 2];
-
-    // 중력 적용
-    vy += gravity * dt;
-
-    // 이동
-    x += vx * dt;
-    y += vy * dt;
-    z += vz * dt;
-
-    lifetimes[i] += dt;
-
-    // 물속으로 떨어졌다고 보는 기준: waterLevel 보다 충분히 아래
-    const fellIntoWater = y < waterLevel - 0.2;
-    const dead = lifetimes[i] > maxLifetimes[i];
-
-    if (fellIntoWater || dead) {
-      // 죽은 파티클은 아래 어딘가에 묻어두고 카운트만 증가 안 시킴
-      positions[i3 + 1] = waterLevel - 10; // 화면 아래로 내려보냄
-      velocities[i3 + 0] = 0;
-      velocities[i3 + 1] = 0;
-      velocities[i3 + 2] = 0;
-      continue;
+  for (let k = 0; k < newToSpawn; k++) {
+    // 비활성 슬롯 하나 찾기
+    let idx = -1;
+    for (let i = 0; i < count; i++) {
+      if (lifetimes[i] < 0) {
+        idx = i;
+        break;
+      }
     }
+    if (idx === -1) break;
 
-    // 살아있는 파티클만 position/velocity 유지
+    const i3 = idx * 3;
+
+    const angle = Math.random() * Math.PI * 2;
+    const r = Math.random() * spread;
+
+    const ox = Math.cos(angle) * r;
+    const oz = Math.sin(angle) * r;
+    const oy = (Math.random() - 0.5) * spread * 0.4;
+
+    const x = apex.x + ox;
+    const y = apex.y + oy;
+    const z = apex.z + oz;
+
     positions[i3 + 0] = x;
     positions[i3 + 1] = y;
     positions[i3 + 2] = z;
 
-    velocities[i3 + 0] = vx;
-    velocities[i3 + 1] = vy;
-    velocities[i3 + 2] = vz;
+    // 위로 + 옆으로 튀어 나가는 초기 속도
+    velocities[i3 + 0] = (Math.random() - 0.5) * 0.3;
+    velocities[i3 + 1] = 0.6 + Math.random() * 0.4;
+    velocities[i3 + 2] = (Math.random() - 0.5) * 0.3;
 
-    aliveCount++;
+    lifetimes[idx] = 0;
+    maxLifetimes[idx] = 1.0 + Math.random() * 1.3; // 1~2.3초
   }
 
   posAttr.needsUpdate = true;
-
-  // --- 2-3) 모든 파티클이 죽으면 버스트 종료 & 다음 버스트까지 대기 ---
-  if (aliveCount === 0) {
-    pData.active = false;
-    // 완전히 투명하게
-    material.opacity = 0.0;
-    material.needsUpdate = true;
-
-    // 다음 버스트까지 랜덤 시간 설정
-    const min = pData.burstIntervalMin;
-    const max = pData.burstIntervalMax;
-    pData.burstTimer = min + Math.random() * (max - min);
-  }
 }

@@ -254,15 +254,22 @@ function buildMeshes({ segments, buds, totalHeight }) {
 
   // 봉오리: 줄기 반경 연동
   if (buds.length) {
-    const unitGeo = new THREE.SphereGeometry(1, 16, 12); // 유닛 구 → 스케일로 반경 반영
-    const bMat = new THREE.MeshStandardMaterial({
-      color: api.budColor,
-      roughness: 0.75,
-    });
+    const unitGeo = new THREE.Mesh(
+      new THREE.SphereGeometry(1, 16, 12),
+      new THREE.MeshStandardMaterial({
+        color: api.budColor,
+        roughness: 0.75,
+      })
+    );
+
     for (const b of buds) {
-      const bm = new THREE.Mesh(unitGeo, bMat);
+      const bm = unitGeo.clone();
       bm.position.copy(b.pos);
-      bm.scale.setScalar(b.r); // ← 여기서 크기 연동!
+      bm.scale.setScalar(b.r);
+
+      // 🔹 이 메쉬가 "봉오리"라는 것을 표시 (파티클 emitter가 이걸 찾음)
+      bm.userData.isBud = true;
+
       group.add(bm);
     }
   }
@@ -302,6 +309,105 @@ export function updateWeirdPlant(dt) {
   _swayNode.rotation.x = c * 0.25;
 }
 
+// 🔹 L-system 식물용 꽃가루 파티클 emitter 생성 (맨 꼭대기 봉오리 기준)
+function attachPlantParticles(root, options = {}) {
+  const count = options.count ?? 80; // 파티클 개수
+  const spread = options.spread ?? 0.15; // 봉오리 주변 퍼지는 정도
+  const riseHeight = options.riseHeight ?? 1.2;
+
+  // 1) 이 식물(root) 안의 봉오리들 중 "가장 높은 y" 하나 찾기 (로컬 좌표 기준)
+  const budPositions = [];
+  root.traverse((obj) => {
+    if (obj.userData && obj.userData.isBud) {
+      budPositions.push(obj.position.clone());
+    }
+  });
+
+  if (budPositions.length === 0) {
+    console.warn("[lsystem] no buds found for pollen emitter");
+    return;
+  }
+
+  // 🔹 y가 가장 큰 봉오리 선택 (맨 꼭대기 봉오리)
+  let topBud = budPositions[0];
+  for (let i = 1; i < budPositions.length; i++) {
+    if (budPositions[i].y > topBud.y) {
+      topBud = budPositions[i];
+    }
+  }
+  // clone 해서 저장
+  topBud = topBud.clone();
+
+  const positions = new Float32Array(count * 3);
+  const velocities = new Float32Array(count * 3);
+  const lifetimes = new Float32Array(count);
+  const maxLifetimes = new Float32Array(count);
+
+  for (let i = 0; i < count; i++) {
+    // 항상 "topBud" 기준으로 spawn
+    const angle = Math.random() * Math.PI * 2;
+    const r = Math.random() * spread;
+
+    const ox = Math.cos(angle) * r;
+    const oz = Math.sin(angle) * r;
+    const oy = (Math.random() - 0.5) * spread * 0.4;
+
+    const x = topBud.x + ox;
+    const y = topBud.y + oy;
+    const z = topBud.z + oz;
+
+    positions[i * 3 + 0] = x;
+    positions[i * 3 + 1] = y;
+    positions[i * 3 + 2] = z;
+
+    // 꽃가루가 살짝 위로 + 옆으로 흩어지게
+    velocities[i * 3 + 0] = (Math.random() - 0.5) * 0.25;
+    velocities[i * 3 + 1] = 0.25 + Math.random() * 0.35;
+    velocities[i * 3 + 2] = (Math.random() - 0.5) * 0.25;
+
+    const life = 1.5 + Math.random() * 2.0; // 1.5~3.5초 살다가 사라짐
+    lifetimes[i] = Math.random() * life;
+    maxLifetimes[i] = life;
+  }
+
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+  geo.setAttribute("velocity", new THREE.BufferAttribute(velocities, 3));
+
+  const mat = new THREE.PointsMaterial({
+    color: 0xfff7e6,
+    size: 0.05,
+    sizeAttenuation: true,
+    transparent: true,
+    opacity: 0.9,
+    depthWrite: false,
+  });
+
+  const points = new THREE.Points(geo, mat);
+  points.name = "PlantPollen";
+
+  const emitter = new THREE.Group();
+  emitter.add(points);
+  emitter.position.set(0, 0, 0); // root 기준
+
+  root.add(emitter);
+
+  root.userData.particles = {
+    emitter,
+    geo,
+    positions,
+    velocities,
+    lifetimes,
+    maxLifetimes,
+    topBud, // 🔹 봉오리 위치 하나만 저장
+    spread,
+    riseHeight,
+    count,
+    time: Math.random() * 10,
+    material: mat,
+  };
+}
+
 export function createWeirdPlantInstance(opts = {}) {
   // api 임시 덮어쓰기로 생성(확장/빌드 함수가 api를 참조하므로)
   const apiBackup = { ...api };
@@ -336,17 +442,102 @@ export function createWeirdPlantInstance(opts = {}) {
   // 🔹 나중에 "수면 위까지" 스케일 계산할 때 쓰는 기본 높이
   root.userData.baseHeight = baseHeight;
 
+  attachPlantParticles(root, {
+    count: 70,
+    spread: baseHeight * 0.12,
+    riseHeight: baseHeight * 0.5,
+  });
+
   // api 원복
   Object.assign(api, apiBackup);
   return root;
 }
 
 export function updateWeirdPlantInstance(root, dt) {
+  // 1) sway (원래 있던 흔들림)
   const s = root?.userData?.sway;
-  if (!s) return;
-  s.phase += dt * s.freq;
-  const z = Math.sin(s.phase) * s.amp * 0.35;
-  const x = Math.cos(s.phase * 0.8) * s.amp * 0.25;
-  s.node.rotation.z = z;
-  s.node.rotation.x = x;
+  if (s) {
+    s.phase += dt * s.freq;
+    const z = Math.sin(s.phase) * s.amp * 0.35;
+    const x = Math.cos(s.phase * 0.8) * s.amp * 0.25;
+    s.node.rotation.z = z;
+    s.node.rotation.x = x;
+  }
+
+  // 2) 꽃가루 파티클
+  const pData = root.userData.particles;
+  if (!pData) return;
+
+  const {
+    geo,
+    positions,
+    velocities,
+    lifetimes,
+    maxLifetimes,
+    topBud, // 🔹 맨 꼭대기 봉오리 위치
+    spread,
+    riseHeight,
+    count,
+    material,
+  } = pData;
+
+  const posAttr = geo.getAttribute("position");
+  pData.time += dt;
+
+  for (let i = 0; i < count; i++) {
+    const i3 = i * 3;
+
+    let x = positions[i3 + 0];
+    let y = positions[i3 + 1];
+    let z = positions[i3 + 2];
+
+    const vx = velocities[i3 + 0];
+    const vy = velocities[i3 + 1];
+    const vz = velocities[i3 + 2];
+
+    // 위로 + 옆으로 이동
+    x += vx * dt;
+    y += vy * dt;
+    z += vz * dt;
+
+    lifetimes[i] += dt;
+
+    const tooHigh = y > topBud.y + riseHeight * 2.0;
+    const dead = lifetimes[i] > maxLifetimes[i];
+
+    if (tooHigh || dead) {
+      // 🔹 새로 spawn: 항상 topBud 주변에서만
+      const angle = Math.random() * Math.PI * 2;
+      const r = Math.random() * spread;
+
+      const ox = Math.cos(angle) * r;
+      const oz = Math.sin(angle) * r;
+      const oy = (Math.random() - 0.5) * spread * 0.4;
+
+      x = topBud.x + ox;
+      y = topBud.y + oy;
+      z = topBud.z + oz;
+
+      velocities[i3 + 0] = (Math.random() - 0.5) * 0.25;
+      velocities[i3 + 1] = 0.25 + Math.random() * 0.35;
+      velocities[i3 + 2] = (Math.random() - 0.5) * 0.25;
+
+      const life = 1.5 + Math.random() * 2.0;
+      lifetimes[i] = 0;
+      maxLifetimes[i] = life;
+    }
+
+    positions[i3 + 0] = x;
+    positions[i3 + 1] = y;
+    positions[i3 + 2] = z;
+  }
+
+  posAttr.needsUpdate = true;
+
+  // 전체 구름 opacity 살짝 펄스
+  if (material) {
+    const pulse = 0.75 + 0.25 * Math.sin(pData.time * 0.4);
+    material.opacity = 0.4 + 0.5 * pulse;
+    material.needsUpdate = true;
+  }
 }

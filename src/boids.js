@@ -1,4 +1,3 @@
-// src/boids.js
 import * as THREE from "three";
 import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 import { clone as cloneSkinned } from "three/addons/utils/SkeletonUtils.js";
@@ -9,17 +8,23 @@ const CLIP_NAME = "FeedingTentacle_WaveTest";
 
 const BOID_COUNT = 40;
 const NEIGHBOR_RADIUS = 18;
-const MAX_SPEED = 14.0; // 🔹 살짝 올림
-const MIN_SPEED = 4.0; // 🔹 최소 속도 보장
+const MAX_SPEED = 14.0;
+const MIN_SPEED = 4.0;
 const MAX_FORCE = 8.0;
-const DAMPING = 0.99; // 🔹 덜 죽게
+// 🔹 계속 유영하게: 감쇠 제거
+const DAMPING = 1.0;
 
 const WORLD_RADIUS = 80;
 
-const W_SEP = 2.0;
+// 분리/응집/정렬
+const W_SEP = 2.4;
 const W_COH = 1.2;
 const W_ALI = 0.8;
 const CENTER_K = 0.003;
+
+// 캐릭터 회피
+const CHAR_AVOID_RADIUS = 10.0;
+const W_CHAR = 6.0;
 
 // 식물 끌림 힘
 const W_PLANT = 0.6;
@@ -27,6 +32,9 @@ const PLANT_ATTR_RADIUS = 40.0;
 
 // 캐릭터 스케일 설정
 const BOID_SCALE = 3.0;
+// 🔹 보이드끼리 최소 간격
+const DESIRED_SEP = BOID_SCALE * 1.2;
+const W_FLOW = 0.45; // 기본 순환 흐름 세기
 
 // ===== RD 텍스처 =====
 const RD_URL = "./assets/textures/rd_pattern.png";
@@ -104,6 +112,7 @@ let _ready = false;
 let _sampleTerrainHeight = null; // 지형(섬) 높이
 let _sampleWaterHeight = null; // 물 표면 높이
 let _plants = null; // main.js에서 넘겨주는 식물 배열
+let _character = null;
 
 const loader = new GLTFLoader();
 
@@ -168,7 +177,7 @@ function getPlantAttraction(pos) {
   out.set(nearest.x - pos.x, 0, nearest.z - pos.z);
   const dist = Math.sqrt(nearestD2);
   if (dist > 1e-4) {
-    const strength = 1.0 / (dist + 4.0); // 약간 더 강하게 끌리게
+    const strength = 1.0 / (dist + 4.0);
     out.multiplyScalar(strength);
   }
 
@@ -183,6 +192,7 @@ export function initBoids({
   sampleTerrainHeight,
   sampleWaterHeight,
   plants = null,
+  character = null,
   areaSize = 150,
   count = BOID_COUNT,
   modelPath = GLB_PATH,
@@ -192,6 +202,7 @@ export function initBoids({
   _sampleTerrainHeight = sampleTerrainHeight;
   _sampleWaterHeight = sampleWaterHeight;
   _plants = plants;
+  _character = character;
 
   const half = areaSize * 0.5;
 
@@ -254,16 +265,16 @@ export function initBoids({
         wrapper.position.set(x, waterY + 0.01, z);
 
         wrapper.userData.isObstacle = true;
-        wrapper.userData.collisionRadius = BOID_SCALE * 0.5; // 대략 몸통 반지름
+        wrapper.userData.collisionRadius = BOID_SCALE * 0.5;
 
         _scene.add(wrapper);
         boidObjects.push(wrapper);
         boidPositions.push(wrapper.position);
 
-        // 초기 속도: 좀 더 세게
+        // 초기 속도
         const dir = new THREE.Vector3(randRange(-1, 1), 0, randRange(-1, 1));
         if (dir.lengthSq() < 1e-4) dir.set(1, 0, 0);
-        dir.normalize().multiplyScalar(randRange(2.0, 4.0)); // 🔹 2~4
+        dir.normalize().multiplyScalar(randRange(2.0, 4.0));
         boidVelocities.push(dir.clone());
 
         if (clip) {
@@ -302,10 +313,9 @@ export function updateBoids(dt) {
     acc[i].set(0, 0, 0);
   }
 
-  // 1) 이웃 + 식물 끌림 힘 계산
+  // 1) 이웃 + 식물 끌림 + 캐릭터 회피 힘 계산
   for (let i = 0; i < count; i++) {
     const posI = boidPositions[i];
-    const velI = boidVelocities[i];
 
     const sep = new THREE.Vector3();
     const coh = new THREE.Vector3();
@@ -323,9 +333,15 @@ export function updateBoids(dt) {
       const d2 = dx * dx + dz * dz;
       if (d2 > NEIGHBOR_R2 || d2 === 0) continue;
 
-      const dir = new THREE.Vector3(dx, 0, dz);
-      const sepForce = dir.clone().multiplyScalar(-1 / d2);
-      sep.add(sepForce);
+      const d = Math.sqrt(d2);
+      const offset = new THREE.Vector3(dx, 0, dz);
+
+      // 🔹 일정 거리 이내면 강하게 밀어내기 (겹침 방지)
+      if (d < DESIRED_SEP && d > 0.0001) {
+        const dirAway = offset.clone().multiplyScalar(-1.0 / d); // 단위벡터 반대방향
+        const strength = (DESIRED_SEP - d) / DESIRED_SEP; // 0~1
+        sep.addScaledVector(dirAway, strength);
+      }
 
       coh.add(posJ);
       cohCount++;
@@ -347,7 +363,10 @@ export function updateBoids(dt) {
       if (ali.length() > 0) ali.normalize();
     }
 
-    if (sep.length() > 0) sep.normalize();
+    // 🔹 분리 벡터 너무 커지지 않게
+    if (sep.length() > 0) {
+      sep.normalize();
+    }
 
     const centerDir = new THREE.Vector3()
       .subVectors(new THREE.Vector3(0, posI.y, 0), posI)
@@ -365,12 +384,36 @@ export function updateBoids(dt) {
 
     const plantForce = getPlantAttraction(posI);
 
+    // 🔹 캐릭터 회피 힘
+    const charForce = new THREE.Vector3();
+    if (_character && _character.position) {
+      const cp = _character.position;
+      const dxC = cp.x - posI.x;
+      const dzC = cp.z - posI.z;
+      const d2C = dxC * dxC + dzC * dzC;
+      const r2C = CHAR_AVOID_RADIUS * CHAR_AVOID_RADIUS;
+      if (d2C < r2C && d2C > 1e-4) {
+        const distC = Math.sqrt(d2C);
+        charForce.set(-dxC / distC, 0, -dzC / distC);
+        const t = 1.0 - distC / CHAR_AVOID_RADIUS; // 가까울수록 강하게
+        charForce.multiplyScalar(t);
+      }
+    }
+
+    // 🔹 기본 유영 흐름(원 궤도) – 항상 약간씩 회전
+    const flow = new THREE.Vector3(-posI.z, 0, posI.x);
+    if (flow.lengthSq() > 0) {
+      flow.normalize(); // 원둘레 방향
+    }
+
     const steer = new THREE.Vector3()
       .addScaledVector(sep, W_SEP)
       .addScaledVector(coh, W_COH)
       .addScaledVector(ali, W_ALI)
       .add(centerDir)
-      .addScaledVector(plantForce, W_PLANT);
+      .addScaledVector(plantForce, W_PLANT)
+      .addScaledVector(charForce, W_CHAR) // ✅ 캐릭터 회피 실제 반영
+      .addScaledVector(flow, W_FLOW); // ✅ 항상 흐름 추가
 
     if (steer.length() > MAX_FORCE) {
       steer.multiplyScalar(MAX_FORCE / steer.length());
@@ -399,13 +442,13 @@ export function updateBoids(dt) {
     // 🔹 속도가 너무 느리면 최소 속도까지 부스트
     if (speed < MIN_SPEED) {
       if (speed < 1e-4) {
-        // 완전히 멈췄으면 랜덤 방향 부여
         v.set(randRange(-1, 1), 0, randRange(-1, 1)).normalize();
         speed = 1.0;
       }
       v.multiplyScalar(MIN_SPEED / (speed + 1e-6));
     }
 
+    // 감쇠는 없음 (항상 유영)
     if (DAMPING !== 1.0) {
       v.multiplyScalar(DAMPING);
     }

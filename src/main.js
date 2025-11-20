@@ -33,6 +33,10 @@ camera.position.set(90, 60, 90);
 camera.lookAt(0, 0, 0);
 
 const renderer = new THREE.WebGLRenderer({ antialias: true });
+
+// 🔹 배경색 설정
+renderer.setClearColor(0x0f2c39, 1); // #820A26
+
 renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.outputColorSpace = THREE.SRGBColorSpace;
@@ -315,6 +319,7 @@ initBoids({
   sampleTerrainHeight,
   sampleWaterHeight,
   plants, // ★ 추가: 같은 배열 참조
+  character: characterRoot,
   areaSize: 160,
   count: 40,
   modelPath: "./assets/models/creature.glb",

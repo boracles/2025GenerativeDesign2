@@ -1,9 +1,11 @@
+//terrain.vert.glsl
 precision mediump float;
 
 // ----- 유니폼 -----
 uniform float uTime;
 uniform float uAmp;
 uniform float uFreq;
+uniform float uFlow; 
 
 // ----- varying -----
 varying float vH;       // 높이(변위) 전달
@@ -49,12 +51,9 @@ void main() {
   // PlaneGeometry를 XZ 평면으로 사용하므로 x,z를 샘플링
   vec2 uv2 = vec2(p.x, p.z) * uFreq;
 
-  // 아주 느린 시간 변조로 '바람 같은' 흐름
-  float t = uTime * 0.05;
-  float h = fbm(uv2 + vec2(t * 0.25, -t * 0.13));
-
-  // 약간의 주기 흔적(인공성) 추가: 미세한 sinusoid 섞기
-  h += 0.1 * sin((p.x + p.z) * 0.03 + t * 0.5);
+  float t = 0.0;  // ★ 0이면 정지, 0.02면 아주 느리게
+  float h = fbm(uv2);
+  h += 0.1 * sin((p.x + p.z) * 0.03); 
 
   // 높이 변위
   float disp = (h - 0.5) * 2.0 * uAmp;

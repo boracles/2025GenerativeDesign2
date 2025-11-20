@@ -14,9 +14,11 @@ import {
 } from "./movement.js";
 import {
   createWeirdPlantRoot,
-  updateWeirdPlant,
-  api as WeirdAPI,
+  // updateWeirdPlant,
+  createWeirdPlantInstance,
+  updateWeirdPlantInstance,
 } from "./lsystem.js";
+import { initBoids, updateBoids } from "./boids.js";
 
 /* =============== 기본 장면 =============== */
 const scene = new THREE.Scene();
@@ -56,7 +58,7 @@ controls.target.set(0, 0, 0);
 /* =============== 지형 / 캐릭터 =============== */
 scene.add(terrainRoot);
 scene.add(characterRoot);
-characterRoot.scale.setScalar(3);
+characterRoot.scale.setScalar(2);
 
 console.log("[main] characterRoot.uuid =", characterRoot.uuid);
 
@@ -128,22 +130,30 @@ const worldToLocalXZ = (x, z) => {
 };
 
 const sampleTerrainHeight = (wx, wz) => {
-  terrainRoot.updateMatrixWorld(true);
+  // 1. world → local 변환
+  const local = new THREE.Vector3(wx, 0, wz);
+  terrainRoot.worldToLocal(local);
+
+  const x = local.x;
+  const z = local.z;
+
   const uAmp = uniforms?.uAmp?.value ?? 0;
   const uFreq = uniforms?.uFreq?.value ?? 1;
-  const uTimeVal = tickUniforms?.uTime?.value ?? uniforms?.uTime?.value ?? 0;
-  const t = uTimeVal * 0.05;
 
-  const { x, z } = worldToLocalXZ(wx, wz);
   const uvx = x * uFreq;
   const uvy = z * uFreq;
-  let h = fbmRaw(uvx + t * 0.25, uvy - t * 0.13);
-  h += 0.1 * Math.sin((x + z) * 0.03 + t * 0.5);
+
+  // 2. shader와 동일한 FBM 계산
+  let h = fbmRaw(uvx, uvy);
+  h += 0.1 * Math.sin((x + z) * 0.03);
+
   const disp = (h - 0.5) * 2.0 * uAmp;
 
-  const p1 = new THREE.Vector3(x, disp, z);
-  terrainRoot.localToWorld(p1);
-  return p1.y;
+  // 3. local y=disp 값을 world 좌표로 변환
+  const pLocal = new THREE.Vector3(x, disp, z);
+  terrainRoot.localToWorld(pLocal);
+
+  return pLocal.y;
 };
 setTerrainHeightSampler(sampleTerrainHeight);
 
@@ -155,18 +165,6 @@ tickUniforms.uFreq.value = 0.05;
 renderer.domElement.style.pointerEvents = "auto";
 controls.enabled = true;
 
-/* =============== Weird Plant 추가 =============== */
-const weird = createWeirdPlantRoot({
-  genMax: 4,
-  step: 0.45,
-  baseRadius: 0.14,
-  arcDeg: 7,
-  budProb: 0.25,
-});
-scene.add(weird);
-weird.position.set(0, 0, 0);
-weird.scale.setScalar(1);
-
 /* =============== 리사이즈 =============== */
 window.addEventListener("resize", () => {
   const w = window.innerWidth;
@@ -176,19 +174,110 @@ window.addEventListener("resize", () => {
   renderer.setSize(w, h);
 });
 
-/* =============== 루프 =============== */
+function alignToSlope(obj) {
+  const p = obj.position;
+  const eps = 0.5;
+
+  const hC = sampleTerrainHeight(p.x, p.z);
+  const hX = sampleTerrainHeight(p.x + eps, p.z);
+  const hZ = sampleTerrainHeight(p.x, p.z + eps);
+
+  const tx = new THREE.Vector3(eps, hX - hC, 0);
+  const tz = new THREE.Vector3(0, hZ - hC, eps);
+
+  const n = new THREE.Vector3().crossVectors(tx, tz).normalize();
+  if (n.y < 0) n.negate();
+
+  const q = new THREE.Quaternion().setFromUnitVectors(
+    new THREE.Vector3(0, 1, 0),
+    n
+  );
+  obj.quaternion.copy(q);
+}
+
+// GLB 보이드 초기화
+initBoids({
+  scene,
+  sampleTerrainHeight,
+  areaSize: 160, // 보이드들이 돌아다닐 XZ 영역
+  count: 40, // 개체 수 원하는대로 조정 가능
+  modelPath: "./assets/models/creature.glb",
+  clipName: "FeedingTentacle_WaveTest",
+});
+
+const plants = [];
+
+function randRange(min, max) {
+  return Math.random() * (max - min) + min;
+}
+
+function spawnWeirdPlants(
+  count = 40,
+  areaSize = 180,
+  scaleMin = 1.2,
+  scaleMax = 4.0
+) {
+  const half = areaSize * 0.5;
+
+  for (let i = 0; i < count; i++) {
+    // 인스턴스마다 약간 파라미터 다양화(선택)
+    const inst = createWeirdPlantInstance({
+      // 모양 다양화 원하면 아래 값들 조금씩 랜덤
+      arcDeg: randRange(6, 16),
+      genMax: 4,
+      plantScale: 1.0, // 기본 스케일(최종은 아래에서 랜덤 배율 추가)
+      swayAmp: randRange(0.06, 0.14),
+      swayFreq: randRange(0.45, 0.85),
+      budProb: randRange(0.15, 0.35),
+    });
+
+    // 위치 랜덤(XZ)
+    const x = randRange(-half, half);
+    const z = randRange(-half, half);
+    inst.position.set(x, 0, z);
+
+    // 높이 고정 및 경사 정렬
+    inst.position.y = sampleTerrainHeight(x, z);
+    alignToSlope(inst);
+
+    // 최종 랜덤 스케일 (개체 크기 변이)
+    const s = randRange(scaleMin, scaleMax);
+    inst.scale.setScalar(s);
+
+    // 약간의 방위 랜덤
+    inst.rotation.y = Math.random() * Math.PI * 2;
+
+    scene.add(inst);
+    plants.push(inst);
+  }
+}
+
+// 호출: 원하는 개수/범위/크기 지정
+spawnWeirdPlants(
+  60, // 개수
+  180, // 배치 영역 한 변 길이
+  1.0, // 최소 스케일
+  3.5 // 최대 스케일
+);
+
 const clock = new THREE.Clock();
 
 function animate() {
   const t = clock.getElapsedTime();
   const dt = clock.getDelta();
-
-  // terrain 시간
   if (tickUniforms) tickUniforms.uTime.value = t;
 
-  // 이동/흔들림
   updateMovement(dt);
-  updateWeirdPlant(dt);
+
+  // 각 식물: 핀 고정 + 경사 정렬 + 개별 스웨이
+  for (const p of plants) {
+    p.position.y = sampleTerrainHeight(p.position.x, p.position.z);
+    alignToSlope(p);
+    updateWeirdPlantInstance(p, dt);
+  }
+
+  // 🔹 GLB boids 업데이트
+  updateBoids(dt);
 
   controls.update();
   renderer.render(scene, camera);

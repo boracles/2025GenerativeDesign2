@@ -1,3 +1,4 @@
+//terrain.js
 import * as THREE from "three";
 
 // GLSL 파일을 브라우저에서 직접 불러오기 (번들러 없음)
@@ -17,11 +18,12 @@ geometry.rotateX(-Math.PI / 2);
 // 유니폼 (요청: uTime, uAmp, uFreq 등)
 export const tickUniforms = {
   uTime: { value: 0 },
-  uAmp: { value: 3.0 }, // 변위 진폭
-  uFreq: { value: 0.02 }, // 노이즈 주파수 (낮을수록 완만)
-  uTintA: { value: new THREE.Color(0x265d74) }, // 보라계열 저지대
-  uTintB: { value: new THREE.Color(0x407e88) }, // 보라계열 중간
-  uTintC: { value: new THREE.Color(0xd17a8e) }, // 보라계열 고지대 하이라이트
+  uAmp: { value: 3.0 },
+  uFreq: { value: 0.02 },
+  uTintA: { value: new THREE.Color(0x265d74) },
+  uTintB: { value: new THREE.Color(0x407e88) },
+  uTintC: { value: new THREE.Color(0xd17a8e) },
+  uFlow: { value: 0.0 }, // ★ 시간 흐름 속도(0=정지)
 };
 
 // ShaderMaterial (fog: false 고정)

@@ -38,8 +38,7 @@ export const api = {
   budColor: 0xd32f2f,
 
   // 전체 스케일
-  plantScale: 1.5, // ← 식물 전체 크기 업
-
+  plantScale: 3.0, // ← 식물 전체 크기 업
   genMax: 4,
 };
 
@@ -267,7 +266,8 @@ function buildMeshes({ segments, buds, totalHeight }) {
   return group;
 }
 
-/* ---------------- 공개 API ---------------- */
+let _swayNode = null;
+
 export function createWeirdPlantRoot(opts = {}) {
   Object.assign(api, opts);
   if (_root && _root.parent) _root.parent.remove(_root);
@@ -278,18 +278,65 @@ export function createWeirdPlantRoot(opts = {}) {
   const data = buildSegments(instr);
   const plant = buildMeshes(data);
 
-  plant.scale.setScalar(api.plantScale); // ← 전체 스케일업
-  _root.add(plant);
+  plant.scale.setScalar(api.plantScale);
+
+  // sway 전용 노드로 분리
+  _swayNode = new THREE.Group();
+  _swayNode.add(plant);
+  _root.add(_swayNode);
 
   _root.rotation.y = Math.random() * Math.PI * 2;
   return _root;
 }
 
 export function updateWeirdPlant(dt) {
-  if (!_root) return;
+  if (!_swayNode) return;
   _t += dt * api.swayFreq;
   const s = Math.sin(_t) * api.swayAmp;
   const c = Math.cos(_t * 0.8) * api.swayAmp * 0.6;
-  _root.rotation.z = s * 0.35;
-  _root.rotation.x = c * 0.25;
+  _swayNode.rotation.z = s * 0.35; // sway는 child에만 적용
+  _swayNode.rotation.x = c * 0.25;
+}
+
+// === 여러 개 심기용 인스턴스 API ================================
+// (기존 createWeirdPlantRoot / updateWeirdPlant는 그대로 둡니다)
+
+export function createWeirdPlantInstance(opts = {}) {
+  // api 임시 덮어쓰기로 생성(확장/빌드 함수가 api를 참조하므로)
+  const apiBackup = { ...api };
+  Object.assign(api, opts);
+
+  const instr = expand("UXRFX", api.genMax);
+  const data = buildSegments(instr);
+  const plant = buildMeshes(data);
+
+  // sway 분리 노드
+  const swayNode = new THREE.Group();
+  plant.scale.setScalar(api.plantScale);
+  swayNode.add(plant);
+
+  const root = new THREE.Group();
+  root.add(swayNode);
+
+  // 인스턴스별 흔들림 상태 저장
+  root.userData.sway = {
+    amp: api.swayAmp,
+    freq: api.swayFreq,
+    phase: Math.random() * Math.PI * 2,
+    node: swayNode,
+  };
+
+  // api 원복 (다음 인스턴스 생성 대비)
+  Object.assign(api, apiBackup);
+  return root;
+}
+
+export function updateWeirdPlantInstance(root, dt) {
+  const s = root?.userData?.sway;
+  if (!s) return;
+  s.phase += dt * s.freq;
+  const z = Math.sin(s.phase) * s.amp * 0.35;
+  const x = Math.cos(s.phase * 0.8) * s.amp * 0.25;
+  s.node.rotation.z = z;
+  s.node.rotation.x = x;
 }

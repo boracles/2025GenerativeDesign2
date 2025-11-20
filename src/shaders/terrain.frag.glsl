@@ -1,3 +1,4 @@
+//terrain.frag.glsl
 precision mediump float;
 
 uniform vec3 uTintA;

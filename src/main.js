@@ -145,6 +145,30 @@ waterPlane.position.y = -0.5;
 
 scene.add(waterPlane);
 
+// 물 표면 높이 샘플러 (boids용)
+const sampleWaterHeight = (wx, wz) => {
+  // world → local 변환
+  const local = new THREE.Vector3(wx, 0, wz);
+  waterPlane.worldToLocal(local);
+
+  const x = local.x;
+  const z = local.z;
+
+  const uAmp = waterUniforms.uAmp.value;
+  const uFreq = waterUniforms.uFreq.value;
+  const time = waterUniforms.uTime.value; // tickUniforms.uTime 공유
+
+  const w1 = Math.sin(x * uFreq + time * 1.5);
+  const w2 = Math.cos(z * uFreq * 1.3 - time * 1.1);
+  const wave = (w1 + w2) * 0.5 * uAmp;
+
+  // local y = wave 를 world y로 변환
+  const pLocal = new THREE.Vector3(x, wave, z);
+  waterPlane.localToWorld(pLocal);
+
+  return pLocal.y;
+};
+
 // 더블사이드 보정(선택)
 if (terrainRoot.material) {
   const mats = Array.isArray(terrainRoot.material)
@@ -281,11 +305,11 @@ function alignToSlope(obj) {
 initBoids({
   scene,
   sampleTerrainHeight,
+  sampleWaterHeight, // ★ 추가
   areaSize: 160,
   count: 40,
   modelPath: "./assets/models/creature.glb",
   clipName: "FeedingTentacle_WaveTest",
-  terrainMesh: terrainRoot,
 });
 
 const plants = [];

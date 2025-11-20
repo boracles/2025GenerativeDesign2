@@ -20,7 +20,7 @@ const W_ALI = 0.6;
 const CENTER_K = 0.01;
 
 // 캐릭터 스케일 설정
-const BOID_SCALE = 3.0; // 최종 스케일 배율
+const BOID_SCALE = 3.0;
 
 // ===== RD 텍스처 =====
 const RD_URL = "./assets/textures/rd_pattern.png";
@@ -92,18 +92,12 @@ let boidPositions = []; // wrapper.position 참조
 let boidVelocities = [];
 let mixers = [];
 
-let _sampleHeight = null;
 let _scene = null;
 let _ready = false;
 
-// ★ 지형 메쉬 & 높이 보정값
-let _terrainMesh = null;
-let _heightBias = 0;
-
-// 레이캐스트 (보정용으로만 한 번 사용)
-const _raycaster = new THREE.Raycaster();
-const _rayOrigin = new THREE.Vector3();
-const _rayDir = new THREE.Vector3(0, -1, 0);
+// 샘플러
+let _sampleTerrainHeight = null; // 지형(섬) 높이
+let _sampleWaterHeight = null; // 물 표면 높이
 
 const loader = new GLTFLoader();
 
@@ -112,27 +106,19 @@ function randRange(min, max) {
 }
 
 // ──────────────────────────────────────────────
-// 지형 높이 헬퍼: 샘플러 + bias
-// ──────────────────────────────────────────────
-function getBoidTerrainHeight(x, z) {
-  if (typeof _sampleHeight !== "function") return 0;
-  return _sampleHeight(x, z) + _heightBias;
-}
-
-// ──────────────────────────────────────────────
-// 지형 노멀 계산 헬퍼 (샘플러 기반, bias는 상수라 무시)
+// 노멀 계산 (워터 플레인 기준)
 // ──────────────────────────────────────────────
 const _tmpTx = new THREE.Vector3();
 const _tmpTz = new THREE.Vector3();
 const _tmpN = new THREE.Vector3();
 
-function getTerrainNormal(x, z) {
-  if (!_sampleHeight) return new THREE.Vector3(0, 1, 0);
+function getWaterNormal(x, z) {
+  if (!_sampleWaterHeight) return new THREE.Vector3(0, 1, 0);
 
   const eps = 0.5;
-  const hC = _sampleHeight(x, z);
-  const hX = _sampleHeight(x + eps, z);
-  const hZ = _sampleHeight(x, z + eps);
+  const hC = _sampleWaterHeight(x, z);
+  const hX = _sampleWaterHeight(x + eps, z);
+  const hZ = _sampleWaterHeight(x, z + eps);
 
   _tmpTx.set(eps, hX - hC, 0);
   _tmpTz.set(0, hZ - hC, eps);
@@ -148,16 +134,16 @@ function getTerrainNormal(x, z) {
 // ──────────────────────────────────────────────
 export function initBoids({
   scene,
-  sampleTerrainHeight,
+  sampleTerrainHeight, // 지형 높이 샘플러
+  sampleWaterHeight, // 물 높이 샘플러
   areaSize = 150,
   count = BOID_COUNT,
   modelPath = GLB_PATH,
   clipName = CLIP_NAME,
-  terrainMesh = null, // ★ terrainRoot 넘겨받기
 }) {
   _scene = scene;
-  _sampleHeight = sampleTerrainHeight;
-  _terrainMesh = terrainMesh;
+  _sampleTerrainHeight = sampleTerrainHeight;
+  _sampleWaterHeight = sampleWaterHeight;
 
   const half = areaSize * 0.5;
 
@@ -166,51 +152,6 @@ export function initBoids({
   boidVelocities = [];
   mixers = [];
 
-  // ── ★ 높이 bias 한 번만 보정 ──
-  _heightBias = 0;
-  if (_terrainMesh && typeof _sampleHeight === "function") {
-    _terrainMesh.updateWorldMatrix(true, false);
-
-    const samples = 40; // 샘플 수
-    let sumDelta = 0;
-    let hitCount = 0;
-
-    for (let i = 0; i < samples; i++) {
-      const x = randRange(-half, half);
-      const z = randRange(-half, half);
-
-      const hFunc = _sampleHeight(x, z);
-
-      _rayOrigin.set(x, 1000, z);
-      _rayDir.set(0, -1, 0);
-      _raycaster.set(_rayOrigin, _rayDir);
-
-      const hits = _raycaster.intersectObject(_terrainMesh, false);
-      if (hits.length > 0) {
-        const hMesh = hits[0].point.y;
-        sumDelta += hMesh - hFunc;
-        hitCount++;
-      }
-    }
-
-    if (hitCount > 0) {
-      _heightBias = sumDelta / hitCount;
-      console.log(
-        "[boids] terrain height bias =",
-        _heightBias.toFixed(4),
-        "(avg over",
-        hitCount,
-        "samples)"
-      );
-    } else {
-      console.warn(
-        "[boids] height bias calibration failed (no raycast hits); using 0"
-      );
-      _heightBias = 0;
-    }
-  }
-
-  // ── GLB 로드 및 boid 생성 ──
   loader.load(
     modelPath,
     (gltf) => {
@@ -227,46 +168,58 @@ export function initBoids({
       }
 
       for (let i = 0; i < count; i++) {
-        const x = randRange(-half, half);
-        const z = randRange(-half, half);
+        // ─ 초기 위치: "물 위"인 곳만 찾기 ─
+        let x = 0,
+          z = 0,
+          waterY = 0,
+          terrainY = 0;
+        const maxTries = 30;
+        let found = false;
 
-        const terrainY = getBoidTerrainHeight(x, z);
+        for (let t = 0; t < maxTries; t++) {
+          x = randRange(-half, half);
+          z = randRange(-half, half);
+
+          waterY = _sampleWaterHeight ? _sampleWaterHeight(x, z) : 0;
+          terrainY = _sampleTerrainHeight ? _sampleTerrainHeight(x, z) : -9999;
+
+          // 섬(지형이 물 위로 튀어나온 곳)은 제외
+          if (terrainY < waterY - 0.02) {
+            found = true;
+            break;
+          }
+        }
+        if (!found && _sampleWaterHeight) {
+          waterY = _sampleWaterHeight(x, z);
+        }
 
         // GLB 인스턴스 생성 + 스케일
         const instance = cloneSkinned(baseScene);
         instance.scale.setScalar(BOID_SCALE);
 
-        // 스케일 적용된 상태에서 bounding box 계산
+        // 바닥이 로컬 y=0에 오도록
         instance.position.set(0, 0, 0);
         instance.updateWorldMatrix(true, true);
         const box = new THREE.Box3().setFromObject(instance);
         const minY = box.min.y;
-        const maxY = box.max.y;
-        const height = maxY - minY;
-
-        // 바닥이 로컬 y=0에 오도록
         instance.position.y -= minY;
-
-        // 개체 전체 높이의 일부만큼 떠 있도록 clearance
-        const clearance = height * 0.2; // 필요하면 0.1~0.3 사이로 조절
 
         // 래퍼 그룹
         const wrapper = new THREE.Group();
         wrapper.add(instance);
-        wrapper.position.set(x, terrainY + clearance, z);
-        wrapper.userData.clearance = clearance;
+        wrapper.position.set(x, waterY + 0.01, z); // 물 표면에 거의 딱 붙게
+
+        _scene.add(wrapper);
+        boidObjects.push(wrapper);
+        boidPositions.push(wrapper.position);
 
         // 초기 속도
         const dir = new THREE.Vector3(randRange(-1, 1), 0, randRange(-1, 1));
         if (dir.lengthSq() < 1e-4) dir.set(1, 0, 0);
         dir.normalize().multiplyScalar(randRange(1, 3));
-        const vel = dir.clone();
+        boidVelocities.push(dir.clone());
 
-        _scene.add(wrapper);
-        boidObjects.push(wrapper);
-        boidPositions.push(wrapper.position); // 참조
-        boidVelocities.push(vel);
-
+        // 애니메이션
         if (clip) {
           const mixer = new THREE.AnimationMixer(instance);
           const action = mixer.clipAction(clip);
@@ -278,7 +231,7 @@ export function initBoids({
       }
 
       _ready = true;
-      console.log(`[boids] loaded GLB & spawned ${count} boids`);
+      console.log(`[boids] loaded GLB & spawned ${count} boids (water nav)`);
     },
     undefined,
     (err) => {
@@ -288,7 +241,7 @@ export function initBoids({
 }
 
 // ──────────────────────────────────────────────
-// 매 프레임 업데이트: main.js의 animate()에서 호출
+// 매 프레임 업데이트
 // ──────────────────────────────────────────────
 export function updateBoids(dt) {
   if (!_ready) return;
@@ -378,11 +331,17 @@ export function updateBoids(dt) {
     acc[i].add(steer);
   }
 
-  // 2) 적분 + 경사 정렬 + 접지
+  // 2) 적분 + 워터 플레인 위로 스냅 + 섬 회피
+  const ISLAND_MARGIN = 0.02; // 지형이 물보다 이만큼 높으면 섬이라고 봄
+
   for (let i = 0; i < count; i++) {
     const wrapper = boidObjects[i];
     const p = boidPositions[i]; // == wrapper.position
     const v = boidVelocities[i];
+
+    // 이전 위치 저장 (섬 충돌 시 롤백용)
+    const prevX = p.x;
+    const prevZ = p.z;
 
     // 속도 업데이트
     v.addScaledVector(acc[i], dt);
@@ -391,26 +350,43 @@ export function updateBoids(dt) {
     if (speed > MAX_SPEED) v.multiplyScalar(MAX_SPEED / speed);
     v.multiplyScalar(DAMPING);
 
-    // XZ 이동만 적용
+    // XZ 이동
     p.x += v.x * dt;
     p.z += v.z * dt;
 
-    // 보정된 지형 높이 (원하면 주변 max 샘플도 가능)
-    let terrainY = getBoidTerrainHeight(p.x, p.z);
+    // 물 높이
+    let waterY = _sampleWaterHeight ? _sampleWaterHeight(p.x, p.z) : 0;
 
-    // 살짝 더 안전하게 하고 싶으면 주석 해제:
-    // const eps = 0.7;
-    // const h0 = getBoidTerrainHeight(p.x,        p.z);
-    // const h1 = getBoidTerrainHeight(p.x + eps,  p.z);
-    // const h2 = getBoidTerrainHeight(p.x - eps,  p.z);
-    // const h3 = getBoidTerrainHeight(p.x,        p.z + eps);
-    // const h4 = getBoidTerrainHeight(p.x,        p.z - eps);
-    // terrainY = Math.max(h0, h1, h2, h3, h4) + 0.02;
+    // 섬(terrain > water) 체크
+    let terrainY =
+      _sampleTerrainHeight && _sampleTerrainHeight(p.x, p.z) != null
+        ? _sampleTerrainHeight(p.x, p.z)
+        : -9999;
 
-    // 노멀은 기존처럼 샘플러 기반
-    const n = getTerrainNormal(p.x, p.z);
+    if (terrainY > waterY - ISLAND_MARGIN) {
+      // 섬에 올라타려고 하면 이전 위치로 롤백 + 속도 반사
+      p.x = prevX;
+      p.z = prevZ;
+      v.x *= -0.5;
+      v.z *= -0.5;
 
-    // slope 회전
+      // 롤백 위치에서 다시 waterY 재계산
+      waterY = _sampleWaterHeight ? _sampleWaterHeight(p.x, p.z) : waterY;
+    }
+
+    // 주변 물 높이도 같이 보고, 가장 높은 곳에 살짝 띄우기
+    if (_sampleWaterHeight) {
+      const eps = 0.6;
+      const h0 = _sampleWaterHeight(p.x + eps, p.z);
+      const h1 = _sampleWaterHeight(p.x - eps, p.z);
+      const h2 = _sampleWaterHeight(p.x, p.z + eps);
+      const h3 = _sampleWaterHeight(p.x, p.z - eps);
+      waterY = Math.max(waterY, h0, h1, h2, h3);
+    }
+
+    // 노멀: 워터 플레인 기준
+    const n = getWaterNormal(p.x, p.z);
+
     const qSlope = new THREE.Quaternion().setFromUnitVectors(
       new THREE.Vector3(0, 1, 0),
       n
@@ -424,11 +400,11 @@ export function updateBoids(dt) {
     } else {
       qYaw.identity();
     }
+
     wrapper.quaternion.copy(qSlope).multiply(qYaw);
 
-    // clearance 만큼 항상 떠 있게
-    const clearance = wrapper.userData.clearance || 0;
-    p.y = terrainY + clearance;
+    // 최종 y: 물 표면에 거의 딱 붙게
+    p.y = waterY + 0.01;
 
     // 애니메이션
     const mixer = mixers[i];

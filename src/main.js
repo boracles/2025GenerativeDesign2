@@ -62,6 +62,89 @@ characterRoot.scale.setScalar(2);
 
 console.log("[main] characterRoot.uuid =", characterRoot.uuid);
 
+/* =============== 물결치는 평면 (워터 플레인) =============== */
+
+// 지형과 같은 크기 사용 (terrain.js의 size=200 기준)
+const waterSize = 200;
+const waterSegs = 128;
+
+const waterGeometry = new THREE.PlaneGeometry(
+  waterSize,
+  waterSize,
+  waterSegs,
+  waterSegs
+);
+waterGeometry.rotateX(-Math.PI / 2);
+
+// 간단 웨이브 셰이더
+const waterVert = /* glsl */ `
+precision mediump float;
+
+uniform float uTime;
+uniform float uAmp;
+uniform float uFreq;
+
+varying float vWave;
+
+void main() {
+  vec3 p = position;
+
+  // 두 방향 파 superposition
+  float w1 = sin((p.x * uFreq) + uTime * 1.5);
+  float w2 = cos((p.z * uFreq * 1.3) - uTime * 1.1);
+
+  float wave = (w1 + w2) * 0.5 * uAmp;
+  p.y += wave;
+
+  vWave = wave;
+
+  gl_Position = projectionMatrix * modelViewMatrix * vec4(p, 1.0);
+}
+`;
+
+const waterFrag = /* glsl */ `
+precision mediump float;
+
+uniform vec3 uColorDeep;
+uniform vec3 uColorShallow;
+uniform float uAlpha;
+
+varying float vWave;
+
+void main() {
+  // -uAmp ~ +uAmp 범위를 0~1로 노멀라이즈
+  float h = clamp(vWave * 0.5 + 0.5, 0.0, 1.0);
+  vec3 col = mix(uColorDeep, uColorShallow, h);
+
+  gl_FragColor = vec4(col, uAlpha);
+}
+`;
+
+// uTime은 terrain과 공유해서 한 시계로 움직이게
+const waterUniforms = {
+  uTime: tickUniforms.uTime, // 같은 시계 공유
+  uAmp: { value: 0.4 }, // 파 높이
+  uFreq: { value: 0.08 }, // 파 주기
+  uColorDeep: { value: new THREE.Color(0x265d74) }, // terrain uTintA
+  uColorShallow: { value: new THREE.Color(0x407e88) },
+  uAlpha: { value: 0.7 },
+};
+
+const waterMaterial = new THREE.ShaderMaterial({
+  vertexShader: waterVert,
+  fragmentShader: waterFrag,
+  uniforms: waterUniforms,
+  transparent: true,
+  depthWrite: false,
+});
+
+const waterPlane = new THREE.Mesh(waterGeometry, waterMaterial);
+
+// 지형 기준 살짝 위로 띄우기 (골짜기에 물 고인 느낌)
+waterPlane.position.y = -0.5;
+
+scene.add(waterPlane);
+
 // 더블사이드 보정(선택)
 if (terrainRoot.material) {
   const mats = Array.isArray(terrainRoot.material)
@@ -195,14 +278,14 @@ function alignToSlope(obj) {
   obj.quaternion.copy(q);
 }
 
-// GLB 보이드 초기화
 initBoids({
   scene,
   sampleTerrainHeight,
-  areaSize: 160, // 보이드들이 돌아다닐 XZ 영역
-  count: 40, // 개체 수 원하는대로 조정 가능
+  areaSize: 160,
+  count: 40,
   modelPath: "./assets/models/creature.glb",
   clipName: "FeedingTentacle_WaveTest",
+  terrainMesh: terrainRoot,
 });
 
 const plants = [];

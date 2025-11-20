@@ -1,11 +1,8 @@
 //terrain.vert.glsl
 precision mediump float;
 
-// ----- 유니폼 -----
-uniform float uTime;
 uniform float uAmp;
 uniform float uFreq;
-uniform float uFlow; 
 
 // ----- varying -----
 varying float vH;       // 높이(변위) 전달

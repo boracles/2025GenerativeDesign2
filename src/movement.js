@@ -1,4 +1,4 @@
-// 클릭으로 타겟 지정, 캐릭터를 부드럽게 이동 & 지형 높이에 안착
+// src/movement.js
 import * as THREE from "three";
 
 let _camera, _renderer, _terrain, _character;
@@ -14,11 +14,14 @@ let _downRay,
 let _lastSafeY = 0; // 마지막 안전 y
 let _terrainAABBWorld = null;
 let _clampMargin = 0;
-let _heightSampler = null; // (x,z) => height
+let _heightSampler = null; // (x,z) => height(nav)
 let _speed = 16; // 이동 속도 (유닛/초)
 let _arriveEps = 0.1; // 도착 판정
 let _heightOffset = 0; // 지면 위 떠 있는 높이
-let _slopeAlign = 0.35; // 경사 보정 강도 0~1 (0 = 수직 고정, 1 = 노멀 완전 정렬)
+let _slopeAlign = 0.35; // (지금은 회전에는 안 씀)
+
+let _rootScene = null;
+let _obstacles = []; // userData.isObstacle 객체들
 
 export function setTerrainHeightSampler(fn) {
   _heightSampler = typeof fn === "function" ? fn : null;
@@ -29,6 +32,9 @@ export function initMovement({ camera, renderer, terrainRoot, characterRoot }) {
   _renderer = renderer;
   _terrain = terrainRoot;
   _character = characterRoot;
+
+  // 씬 루트 추적 (terrain이나 character의 parent를 씬으로 가정)
+  _rootScene = terrainRoot.parent || _character.parent || null;
 
   // 캐릭터가 저장해둔 접지 반경 가져오기 (없으면 기본값)
   _groundRadius =
@@ -41,7 +47,7 @@ export function initMovement({ camera, renderer, terrainRoot, characterRoot }) {
     _character?.children?.[0]?.userData?.footClearance ??
     0;
 
-  // ✅ 루트/부모 스케일까지 반영 (루트에 setScalar(5) 등 적용된 경우)
+  // 루트/부모 스케일까지 반영
   const _ws = new THREE.Vector3();
   _character.getWorldScale(_ws);
   _groundRadius *= Math.max(_ws.x, _ws.z);
@@ -49,16 +55,15 @@ export function initMovement({ camera, renderer, terrainRoot, characterRoot }) {
   _groundRadius *= _groundRadiusMul;
   _clampMargin = _groundRadius;
 
-  // ✅ 지형 월드 AABB 계산 (변위(uAmp)만큼 y 여유)
+  // 지형 월드 AABB 계산
   terrainRoot.updateMatrixWorld(true);
   const geo = _terrain.geometry;
   if (geo && !geo.boundingBox) geo.computeBoundingBox();
   if (geo && geo.boundingBox) {
     const bb = geo.boundingBox.clone(); // 로컬 AABB
     const uAmp = terrainRoot.material?.uniforms?.uAmp?.value ?? 0;
-    bb.min.y -= uAmp; // 변위 여유
+    bb.min.y -= uAmp;
     bb.max.y += uAmp;
-    // 월드로 변환
     _terrainAABBWorld = new THREE.Box3();
     _terrainAABBWorld.min.copy(bb.min);
     _terrainAABBWorld.max.copy(bb.max);
@@ -66,7 +71,6 @@ export function initMovement({ camera, renderer, terrainRoot, characterRoot }) {
     _terrainAABBWorld.applyMatrix4(_terrain.matrixWorld);
   }
 
-  // 첫 안전 y 초기화
   _lastSafeY = _character.position.y;
 
   _renderer.domElement.style.touchAction = "none";
@@ -89,26 +93,22 @@ export function initMovement({ camera, renderer, terrainRoot, characterRoot }) {
     passive: false,
   });
 
-  // 이동 대상 노드의 행렬 자동 갱신을 보장
   _character.matrixAutoUpdate = true;
-  // 혹시 상위에서 끈 경우를 대비해 씬 갱신 트리거
   _character.updateMatrixWorld(true);
 
   console.log("[movement] _character.uuid =", _character.uuid);
 
-  // 🔎 디버그 타깃 마커
+  // 디버그 타깃 마커
   const g = new THREE.SphereGeometry(0.25, 16, 12);
   const m = new THREE.MeshBasicMaterial({ color: 0x44ff88 });
   _debugMarker = new THREE.Mesh(g, m);
   _debugMarker.visible = false;
-  // 씬에 직접 접근이 없으니, 캐릭터의 부모(있는 경우) 아니면 캐릭터에 얹음
   (_character.parent || _character).add(_debugMarker);
 }
 
 export function recalcCharacterFootprint() {
   if (!_character) return;
 
-  // GLB 로딩 후 userData 값 반영
   let gr =
     _character?.userData?.groundRadius ??
     _character?.children?.[0]?.userData?.groundRadius ??
@@ -119,7 +119,6 @@ export function recalcCharacterFootprint() {
     _character?.children?.[0]?.userData?.footClearance ??
     _footClearance;
 
-  // 월드 스케일까지 반영
   const ws = new THREE.Vector3();
   _character.getWorldScale(ws);
   _groundRadius = (gr ?? 0.6) * Math.max(ws.x, ws.z) * _groundRadiusMul;
@@ -128,26 +127,44 @@ export function recalcCharacterFootprint() {
   _clampMargin = _groundRadius;
 }
 
-// 현재 (x,z) 지점의 높이 경사(gradient) 크기 추정
-function sampleGradient(x, z) {
-  if (!_heightSampler) return 0;
-  const d = Math.max(0.05, _groundRadius * 0.2); // 미소 거리
-  const hx1 = _heightSampler(x + d, z),
-    hx2 = _heightSampler(x - d, z);
-  const hz1 = _heightSampler(x, z + d),
-    hz2 = _heightSampler(x, z - d);
-  const gx =
-    Number.isFinite(hx1) && Number.isFinite(hx2) ? (hx1 - hx2) / (2 * d) : 0;
-  const gz =
-    Number.isFinite(hz1) && Number.isFinite(hz2) ? (hz1 - hz2) / (2 * d) : 0;
-  return Math.hypot(gx, gz);
+// ----- 장애물 스캔 & 충돌 푸시 -----
+function refreshObstacles() {
+  if (!_rootScene) return;
+  _obstacles.length = 0;
+
+  _rootScene.traverse((obj) => {
+    if (obj.userData && obj.userData.isObstacle) {
+      _obstacles.push(obj);
+    }
+  });
 }
 
-// 중앙+4방향 샘플링으로 '가장 높은' 지면 y를 반환 (경사/능선에서 박힘 방지)
+// 캐릭터를 장애물 밖으로 수평 밀어내기
+function pushOutFromObstacles(pos) {
+  if (!_obstacles || _obstacles.length === 0) return;
+
+  const cr = _groundRadius; // 캐릭터 반경
+
+  for (const obj of _obstacles) {
+    const p = obj.position; // 월드 좌표
+    const r = (obj.userData.collisionRadius || 1.0) + cr * 0.6;
+
+    const dx = pos.x - p.x;
+    const dz = pos.z - p.z;
+    const d2 = dx * dx + dz * dz;
+    if (d2 < r * r && d2 > 1e-6) {
+      const d = Math.sqrt(d2);
+      const push = r - d + 1e-3;
+      pos.x += (dx / d) * push;
+      pos.z += (dz / d) * push;
+    }
+  }
+}
+
+// 중앙+4방향 높이 샘플 → 가장 높은 지점 반환 (수면+언덕 포함)
 function sampleSurfaceMaxY(x, z) {
   if (!_heightSampler) return null;
 
-  // 지형 바운드 밖이면 null 리턴 → 상위에서 폴백 처리
   if (_terrainAABBWorld) {
     if (
       x < _terrainAABBWorld.min.x ||
@@ -159,48 +176,29 @@ function sampleSurfaceMaxY(x, z) {
     }
   }
 
-  // 1) 중앙 높이 & 경사 추정(중앙차분)
   let maxY = _heightSampler(x, z);
   const d = Math.max(0.05, _groundRadius * 0.2);
+
   const hx1 = _heightSampler(x + d, z),
     hx2 = _heightSampler(x - d, z);
   const hz1 = _heightSampler(x, z + d),
     hz2 = _heightSampler(x, z - d);
-  const gx =
-    Number.isFinite(hx1) && Number.isFinite(hx2) ? (hx1 - hx2) / (2 * d) : 0;
-  const gz =
-    Number.isFinite(hz1) && Number.isFinite(hz2) ? (hz1 - hz2) / (2 * d) : 0;
-  const grad = Math.hypot(gx, gz); // 경사 크기
 
-  // 2) 경사 기반 가변 반경 (경사가 클수록 footprint 확장)
-  const kSlope = 0.7; // 가중치
-  const rBase = _groundRadius * (1 + kSlope * Math.min(1.5, grad));
-  const radii = [rBase * 0.7, rBase, rBase * 1.35];
+  if (Number.isFinite(hx1)) maxY = Math.max(maxY, hx1);
+  if (Number.isFinite(hx2)) maxY = Math.max(maxY, hx2);
+  if (Number.isFinite(hz1)) maxY = Math.max(maxY, hz1);
+  if (Number.isFinite(hz2)) maxY = Math.max(maxY, hz2);
 
-  // 3) 24방향 × 3링 샘플
-  const N = 24;
-  for (let ri = 0; ri < radii.length; ri++) {
-    const r = radii[ri];
-    for (let i = 0; i < N; i++) {
-      const a = (i / N) * Math.PI * 2;
-      const sx = x + Math.cos(a) * r;
-      const sz = z + Math.sin(a) * r;
-      const yv = _heightSampler(sx, sz);
-      if (Number.isFinite(yv)) maxY = Math.max(maxY, yv);
-    }
-  }
   return maxY;
 }
 
-// 하드 바닥: 아래로는 즉시 끌어올리고, 위로 내려올 때만 부드럽게
 function snapYHardFloor(currentY, targetY, dt) {
   if (!Number.isFinite(targetY)) return currentY;
-  const eps = Math.max(1e-3, 0.002 * _footClearance); // 발밑이 클수록 여유도 약간↑
-  if (currentY <= targetY) return targetY + eps; // 절대 아래로 못가게 살짝 위로
+  const eps = Math.max(1e-3, 0.002 * _footClearance);
+  if (currentY <= targetY) return targetY + eps;
   return currentY + (targetY - currentY) * Math.min(1, dt * 12);
 }
 
-// 지형 AABB(월드) 안으로 XZ를 클램프
 function clampXZToTerrain(x, z, margin = 0) {
   if (!_terrainAABBWorld) return { x, z };
   const minX = _terrainAABBWorld.min.x + margin;
@@ -228,26 +226,12 @@ function onPointerDown(ev) {
   _camera.updateMatrixWorld(true);
   _raycaster.setFromCamera(_mouseNdc, _camera);
 
-  // 1차: 지형 우선
   let hitPoint = null;
   const hitsTerrain = _raycaster.intersectObject(_terrain, true);
   if (hitsTerrain.length > 0) {
     hitPoint = hitsTerrain[0].point.clone();
   }
-  // 2차: 씬 전체로 보강(지형이 그룹/셰이더 변위 등으로 안 맞을 때)
-  if (!hitPoint) {
-    // 카메라나 캐릭터 자신 같은 건 제외하고 가장 가까운 바닥성 히트 선택
-    const hitsAll = _raycaster
-      .intersectObjects(
-        (_character.parent || _character).parent?.children || [],
-        true
-      )
-      .filter((h) => h.object !== _character && h.object.parent !== _character);
-    if (hitsAll.length > 0) {
-      hitPoint = hitsAll[0].point.clone();
-    }
-  }
-  // 3차: 완전 폴백 — y=0 평면
+
   if (!hitPoint) {
     const groundPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
     const ray = _raycaster.ray;
@@ -266,47 +250,15 @@ function onPointerDown(ev) {
       if (Number.isFinite(surfaceY))
         _target.y = surfaceY + _footClearance + _heightOffset;
     } else {
-      _target.y += _heightOffset; // 폴백
+      _target.y += _heightOffset;
     }
 
-    // ✅ AABB 안으로 XZ 클램프
     const clamped = clampXZToTerrain(_target.x, _target.z, _clampMargin);
     _target.x = clamped.x;
     _target.z = clamped.z;
 
-    // 클램프된 XZ 기준으로 y 재계산
-    if (_heightSampler) {
-      const surfaceY2 = sampleSurfaceMaxY(_target.x, _target.z);
-      if (Number.isFinite(surfaceY2)) {
-        const grad = sampleGradient(_target.x, _target.z);
-        // 정확식: r * grad / sqrt(1 + grad^2), 안전계수 1.1
-        const tiltClearance =
-          1.1 * _groundRadius * (grad / Math.sqrt(1 + grad * grad));
-
-        _target.y = surfaceY2 + _footClearance + tiltClearance + _heightOffset;
-      }
-    }
-
     _hasTarget = true;
 
-    // ✅ 최종 안전검사: 한 번 더 샘플해서 아래면 즉시 끌어올림
-    const h2 = sampleSurfaceMaxY(_character.position.x, _character.position.z);
-    if (Number.isFinite(h2)) {
-      const grad2 = sampleGradient(
-        _character.position.x,
-        _character.position.z
-      );
-      const kTilt = 0.6;
-      const tilt2 = grad2 * _groundRadius * kTilt;
-      const minAllowed = h2 + _footClearance + tilt2 + _heightOffset + 1e-3;
-
-      if (_character.position.y < minAllowed) {
-        _character.position.y = minAllowed;
-        _character.updateMatrixWorld(true);
-      }
-    }
-
-    // 디버그 표시
     _debugMarker.position.copy(_target);
     _debugMarker.visible = true;
   } else {
@@ -314,123 +266,79 @@ function onPointerDown(ev) {
   }
 }
 
-/**
- * 매 프레임 호출: 이동/안착/회전
- * @param {number} dt - 경과 시간(초)
- */
 export function updateMovement(dt) {
   if (!(dt > 0)) dt = 1 / 60;
   if (!_character || !_terrain) return;
 
-  // 현재 위치 (캐릭터 그룹의 월드 좌표)
+  // 매 프레임 장애물 수집 (식물/boids)
+  if (_rootScene) {
+    refreshObstacles();
+  }
+
   const pos = _character.position;
 
   // 1) 목표가 있으면 XZ 방향으로 이동
   if (_hasTarget) {
-    console.log(
-      "[move] posXZ=",
-      _character.position.x.toFixed(2),
-      _character.position.z.toFixed(2),
-      "→ tgtXZ=",
-      _target.x.toFixed(2),
-      _target.z.toFixed(2)
-    );
-
-    // XZ 평면 거리
     _tmpV3a.set(_target.x - pos.x, 0, _target.z - pos.z);
     const distXZ = _tmpV3a.length();
 
     if (distXZ > _arriveEps) {
-      // 정규화 → 속도 적용
       _tmpV3a.normalize().multiplyScalar(_speed * dt);
-
-      // 오버슈트 방지
       if (_tmpV3a.length() > distXZ) {
         _tmpV3a.setLength(distXZ);
       }
 
-      // 위치 갱신(XZ만) — set으로 직접 기록 + 강제 갱신
       let nx = pos.x + _tmpV3a.x;
       let nz = pos.z + _tmpV3a.z;
+
+      // 월드 AABB 안으로 클램프
       const cl = clampXZToTerrain(nx, nz, _clampMargin);
       _character.position.set(cl.x, pos.y, cl.z);
+
+      // 🔹 장애물들에 겹치면 수평으로 밀어내기
+      pushOutFromObstacles(_character.position);
 
       _character.matrixAutoUpdate = true;
       _character.matrixWorldNeedsUpdate = true;
       _character.updateMatrix();
       _character.updateMatrixWorld(true);
 
-      const tl = clampXZToTerrain(_target.x, _target.z, _clampMargin);
-      _target.x = tl.x;
-      _target.z = tl.z;
-
       // 진행 방향 바라보기 (y축 회전)
-      if (_tmpV3a.lengthSq() > 1e-6) {
-        const heading = Math.atan2(_tmpV3a.x, _tmpV3a.z); // +Z 기준
-        // y 회전만 보정: 부드럽게 보간
-        const current = _character.quaternion.clone();
-        const targetQ = new THREE.Quaternion().setFromAxisAngle(
-          new THREE.Vector3(0, 1, 0),
-          heading
-        );
-        _character.quaternion.slerpQuaternions(
-          current,
-          targetQ,
-          Math.min(1, dt * 6)
-        );
-      }
+      const heading = Math.atan2(_tmpV3a.x, _tmpV3a.z);
+      const current = _character.quaternion.clone();
+      const targetQ = new THREE.Quaternion().setFromAxisAngle(
+        new THREE.Vector3(0, 1, 0),
+        heading
+      );
+      _character.quaternion.slerpQuaternions(
+        current,
+        targetQ,
+        Math.min(1, dt * 6)
+      );
     } else {
-      // 도착
       _hasTarget = false;
     }
   }
 
-  // 2) 지형 높이 안착 — 우선 CPU 샘플러 사용, 실패 시 레이캐스트 폴백
+  // 2) 표면 높이(nav surface: water or hybrid)에 안착
   let didSnap = false;
   if (_heightSampler) {
     const h = sampleSurfaceMaxY(_character.position.x, _character.position.z);
     if (Number.isFinite(h)) {
-      const grad = sampleGradient(_character.position.x, _character.position.z);
-      const tiltClearance =
-        1.1 * _groundRadius * (grad / Math.sqrt(1 + grad * grad));
-
-      const targetY = h + _footClearance + tiltClearance + _heightOffset;
-
+      const targetY = h + _footClearance + _heightOffset;
       const newY = snapYHardFloor(_character.position.y, targetY, dt);
       _character.position.y = newY;
       _character.updateMatrixWorld(true);
       didSnap = true;
-
-      // ✅ 최종 안전검사: 2회 반복으로 예외적 뾰족 능선도 확실히 클램프
-      for (let iter = 0; iter < 2; iter++) {
-        const hh = sampleSurfaceMaxY(
-          _character.position.x,
-          _character.position.z
-        );
-        if (Number.isFinite(hh)) {
-          const gradH = sampleGradient(
-            _character.position.x,
-            _character.position.z
-          );
-          const tiltH =
-            1.1 * _groundRadius * (gradH / Math.sqrt(1 + gradH * gradH));
-          const minAllowed = hh + _footClearance + tiltH + _heightOffset + 1e-3;
-          if (_character.position.y < minAllowed) {
-            _character.position.y = minAllowed;
-            _character.updateMatrixWorld(true);
-          }
-        }
-      }
-      _lastSafeY = _character.position.y; // 안전 y 갱신
+      _lastSafeY = _character.position.y;
     } else {
-      // ⛑ 바운드 밖: 마지막 안전 y로 고정 (또는 y=0 평면 등)
       _character.position.y = _lastSafeY;
       _character.updateMatrixWorld(true);
     }
   }
 
+  // 폴백: 지형 레이캐스트
   if (!didSnap) {
-    // 폴백: 아래로 레이캐스트(변위 전 지오메트리 기준)
     _tmpV3b.set(
       _character.position.x,
       _character.position.y + 50,
@@ -446,18 +354,16 @@ export function updateMovement(dt) {
     }
   }
 
-  // 🔧 GLB 루트가 따로 렌더 기준이면 루트-자식 위치 동기화
+  // GLB 루트-자식 위치 동기화
   if (_character.children && _character.children.length > 0) {
     const childRoot = _character.children[0];
     if (childRoot && childRoot.isObject3D) {
-      // 자식은 로컬 원점 유지 (대부분의 경우가 이게 맞음)
       childRoot.position.set(0, 0, 0);
       childRoot.updateMatrixWorld(true);
     }
   }
 }
 
-/** 필요 시 외부에서 파라미터 튜닝 */
 export function setMovementParams({ speed, heightOffset, slopeAlign } = {}) {
   if (typeof speed === "number") _speed = speed;
   if (typeof heightOffset === "number") _heightOffset = heightOffset;

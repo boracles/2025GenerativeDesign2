@@ -9,15 +9,15 @@ let _t = 0;
 
 export const api = {
   // 스케일 & 감쇠
-  step: 0.28,
-  radius: 0.035,
+  step: 0.42,
+  radius: 0.032,
   radiusDecay: 0.86, // F마다 줄기 반경 감쇠
-  stepDecay: 0.96, // F마다 길이 감쇠
+  stepDecay: 0.992, // F마다 길이 감쇠
   branchEnterRadiusMul: 0.85,
   branchEnterStepMul: 0.9,
 
   // 곡률(각도)
-  arcDeg: 22,
+  arcDeg: 24,
   pitchDeg: 10,
 
   // 분기/봉오리
@@ -33,13 +33,13 @@ export const api = {
   swayFreq: 0.6,
 
   // 컬러
-  colorBottom: 0x8b1a1a,
-  colorTop: 0xff6b6b,
+  colorBottom: 0xa72633,
+  colorTop: 0xf23c6d,
   budColor: 0xd32f2f,
 
   // 전체 스케일
-  plantScale: 3.0, // ← 식물 전체 크기 업
-  genMax: 4,
+  plantScale: 2.8, // ← 식물 전체 크기 업
+  genMax: 6,
 };
 
 const deg = (d) => THREE.MathUtils.degToRad(d);
@@ -165,9 +165,13 @@ function buildSegments(instructions) {
       rad = r1;
       step *= api.stepDecay;
 
-      // 연속 드리프트
-      const drift = yawStep * (Math.random() < 0.5 ? 1 : -1) * api.driftMul;
-      rotYaw(drift);
+      // 연속 드리프트: 항상 한 방향으로 서서히 말리게
+      const driftYaw = yawStep * api.driftMul;
+      rotYaw(driftYaw);
+
+      // 살짝 뒤로 젖혀지도록 pitch도 조금씩 누적
+      const driftPitch = -pitchStep * 0.3;
+      rotPitch(driftPitch);
 
       // 확률 봉오리: 현재 줄기 반경 기반
       if (Math.random() < api.budProb)
@@ -298,9 +302,6 @@ export function updateWeirdPlant(dt) {
   _swayNode.rotation.x = c * 0.25;
 }
 
-// === 여러 개 심기용 인스턴스 API ================================
-// (기존 createWeirdPlantRoot / updateWeirdPlant는 그대로 둡니다)
-
 export function createWeirdPlantInstance(opts = {}) {
   // api 임시 덮어쓰기로 생성(확장/빌드 함수가 api를 참조하므로)
   const apiBackup = { ...api };
@@ -310,9 +311,15 @@ export function createWeirdPlantInstance(opts = {}) {
   const data = buildSegments(instr);
   const plant = buildMeshes(data);
 
+  // 🔹 전체 스케일 먼저 적용
+  plant.scale.setScalar(api.plantScale);
+
+  // 🔹 이 상태에서 로컬 기준 높이 계산
+  const box = new THREE.Box3().setFromObject(plant);
+  const baseHeight = box.max.y - box.min.y; // 식물 로컬 높이
+
   // sway 분리 노드
   const swayNode = new THREE.Group();
-  plant.scale.setScalar(api.plantScale);
   swayNode.add(plant);
 
   const root = new THREE.Group();
@@ -326,7 +333,10 @@ export function createWeirdPlantInstance(opts = {}) {
     node: swayNode,
   };
 
-  // api 원복 (다음 인스턴스 생성 대비)
+  // 🔹 나중에 "수면 위까지" 스케일 계산할 때 쓰는 기본 높이
+  root.userData.baseHeight = baseHeight;
+
+  // api 원복
   Object.assign(api, apiBackup);
   return root;
 }

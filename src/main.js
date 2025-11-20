@@ -62,6 +62,8 @@ characterRoot.scale.setScalar(2);
 
 console.log("[main] characterRoot.uuid =", characterRoot.uuid);
 
+const plants = []; // 보이드와 식물이 같이 공유하는 배열
+
 /* =============== 물결치는 평면 (워터 플레인) =============== */
 
 // 지형과 같은 크기 사용 (terrain.js의 size=200 기준)
@@ -250,19 +252,25 @@ const sampleTerrainHeight = (wx, wz) => {
   const uvx = x * uFreq;
   const uvy = z * uFreq;
 
-  // 2. shader와 동일한 FBM 계산
   let h = fbmRaw(uvx, uvy);
   h += 0.1 * Math.sin((x + z) * 0.03);
 
   const disp = (h - 0.5) * 2.0 * uAmp;
 
-  // 3. local y=disp 값을 world 좌표로 변환
   const pLocal = new THREE.Vector3(x, disp, z);
   terrainRoot.localToWorld(pLocal);
 
   return pLocal.y;
 };
-setTerrainHeightSampler(sampleTerrainHeight);
+
+// 🔹 캐릭터 전용 “네비게이션 높이 샘플러” → 수면 전용
+const sampleNavHeight = (wx, wz) => {
+  const waterY = sampleWaterHeight(wx, wz); // 수면 높이
+  return waterY + 0.02; // 살짝 위로 띄워서 물에 박히지 않게
+};
+
+// movement.js에 넘겨주는 건 '수면 높이'
+setTerrainHeightSampler(sampleNavHeight);
 
 // 지형 파라미터(더 가파르게)
 tickUniforms.uAmp.value = 8.0;
@@ -305,54 +313,90 @@ function alignToSlope(obj) {
 initBoids({
   scene,
   sampleTerrainHeight,
-  sampleWaterHeight, // ★ 추가
+  sampleWaterHeight,
+  plants, // ★ 추가: 같은 배열 참조
   areaSize: 160,
   count: 40,
   modelPath: "./assets/models/creature.glb",
   clipName: "FeedingTentacle_WaveTest",
 });
 
-const plants = [];
-
 function randRange(min, max) {
   return Math.random() * (max - min) + min;
 }
 
 function spawnWeirdPlants(
-  count = 40,
+  count = 200,
   areaSize = 180,
-  scaleMin = 1.2,
-  scaleMax = 4.0
+  scaleMin = 1.0,
+  scaleMax = 6.0,
+  waterY = 0.0, // 🔹 수면 높이 전달
+  margin = 0.08
 ) {
   const half = areaSize * 0.5;
 
+  // 🔹 군집 중심 몇 개만 찍어둠 (전체 영역에 흩뿌려)
+  const clusterCount = 6;
+  const centers = [];
+  for (let i = 0; i < clusterCount; i++) {
+    centers.push({
+      x: randRange(-half * 0.9, half * 0.9),
+      z: randRange(-half * 0.9, half * 0.9),
+    });
+  }
+
+  const clusterInfluence = 0.55; // 이 값이 클수록 군집 느낌 강해짐 (0~1)
+
   for (let i = 0; i < count; i++) {
-    // 인스턴스마다 약간 파라미터 다양화(선택)
     const inst = createWeirdPlantInstance({
-      // 모양 다양화 원하면 아래 값들 조금씩 랜덤
-      arcDeg: randRange(6, 16),
-      genMax: 4,
-      plantScale: 1.0, // 기본 스케일(최종은 아래에서 랜덤 배율 추가)
+      arcDeg: randRange(20, 28),
+      genMax: 5,
+      plantScale: 1.2,
+      step: randRange(0.48, 0.58),
+      stepDecay: randRange(0.985, 0.998),
       swayAmp: randRange(0.06, 0.14),
       swayFreq: randRange(0.45, 0.85),
-      budProb: randRange(0.15, 0.35),
+      budProb: randRange(0.18, 0.3),
     });
 
-    // 위치 랜덤(XZ)
-    const x = randRange(-half, half);
-    const z = randRange(-half, half);
-    inst.position.set(x, 0, z);
+    // 1) 기본은 전체 영역 랜덤
+    let x = randRange(-half, half);
+    let z = randRange(-half, half);
 
-    // 높이 고정 및 경사 정렬
-    inst.position.y = sampleTerrainHeight(x, z);
+    // 2) 일부만 군집 쪽으로 끌어당김
+    if (Math.random() < clusterInfluence) {
+      const center = centers[(Math.random() * centers.length) | 0];
+      const t = randRange(0.4, 0.85); // 1에 가까울수록 더 군집 중심으로 붙음
+
+      x = THREE.MathUtils.lerp(x, center.x, t);
+      z = THREE.MathUtils.lerp(z, center.z, t);
+    }
+
+    // 뿌리의 지형 높이
+    const groundY = sampleTerrainHeight(x, z);
+
+    inst.position.set(x, groundY, z);
     alignToSlope(inst);
 
-    // 최종 랜덤 스케일 (개체 크기 변이)
-    const s = randRange(scaleMin, scaleMax);
-    inst.scale.setScalar(s);
+    // 기본 높이
+    const baseH = inst.userData.baseHeight || 1.0;
 
-    // 약간의 방위 랜덤
+    // 랜덤 스케일 먼저
+    let s = randRange(scaleMin, scaleMax);
+
+    // 수면 위까지 최소 필요 스케일
+    const targetTopY = waterY + margin;
+    const neededScale = baseH > 0 ? (targetTopY - groundY) / baseH : scaleMin;
+
+    if (neededScale > s) {
+      s = Math.min(neededScale, scaleMax);
+    }
+
+    inst.scale.setScalar(s);
     inst.rotation.y = Math.random() * Math.PI * 2;
+
+    inst.userData.isObstacle = true;
+    inst.userData.collisionRadius = s * 0.6; // 스케일 기반 대략 반지름
 
     scene.add(inst);
     plants.push(inst);
@@ -361,10 +405,12 @@ function spawnWeirdPlants(
 
 // 호출: 원하는 개수/범위/크기 지정
 spawnWeirdPlants(
-  60, // 개수
+  130, // 개수
   180, // 배치 영역 한 변 길이
-  1.0, // 최소 스케일
-  3.5 // 최대 스케일
+  1.6, // 최소 스케일
+  3.2,
+  waterPlane.position.y, // 🔹 수면 높이
+  0.12 // 🔹 수면 위로 최소 5cm 정도 나오게
 );
 
 const clock = new THREE.Clock();

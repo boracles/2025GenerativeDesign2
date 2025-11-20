@@ -8,16 +8,22 @@ const GLB_PATH = "./assets/models/creature.glb";
 const CLIP_NAME = "FeedingTentacle_WaveTest";
 
 const BOID_COUNT = 40;
-const NEIGHBOR_RADIUS = 10;
-const MAX_SPEED = 6.0;
+const NEIGHBOR_RADIUS = 18;
+const MAX_SPEED = 14.0; // 🔹 살짝 올림
+const MIN_SPEED = 4.0; // 🔹 최소 속도 보장
 const MAX_FORCE = 8.0;
-const DAMPING = 0.96;
+const DAMPING = 0.99; // 🔹 덜 죽게
+
 const WORLD_RADIUS = 80;
 
-const W_SEP = 1.4;
-const W_COH = 0.6;
-const W_ALI = 0.6;
-const CENTER_K = 0.01;
+const W_SEP = 2.0;
+const W_COH = 1.2;
+const W_ALI = 0.8;
+const CENTER_K = 0.003;
+
+// 식물 끌림 힘
+const W_PLANT = 0.6;
+const PLANT_ATTR_RADIUS = 40.0;
 
 // 캐릭터 스케일 설정
 const BOID_SCALE = 3.0;
@@ -87,17 +93,17 @@ function applyRDMaterial(root, tex) {
 }
 
 // ===== 내부 상태 =====
-let boidObjects = []; // THREE.Group (wrapper)
-let boidPositions = []; // wrapper.position 참조
+let boidObjects = [];
+let boidPositions = [];
 let boidVelocities = [];
 let mixers = [];
 
 let _scene = null;
 let _ready = false;
 
-// 샘플러
 let _sampleTerrainHeight = null; // 지형(섬) 높이
 let _sampleWaterHeight = null; // 물 표면 높이
+let _plants = null; // main.js에서 넘겨주는 식물 배열
 
 const loader = new GLTFLoader();
 
@@ -130,12 +136,53 @@ function getWaterNormal(x, z) {
 }
 
 // ──────────────────────────────────────────────
+// 식물 끌림 힘 계산
+// ──────────────────────────────────────────────
+const _plantForceTemp = new THREE.Vector3();
+
+function getPlantAttraction(pos) {
+  const out = _plantForceTemp;
+  out.set(0, 0, 0);
+
+  if (!_plants || _plants.length === 0) return out;
+
+  let nearest = null;
+  let nearestD2 = PLANT_ATTR_RADIUS * PLANT_ATTR_RADIUS;
+
+  for (let i = 0; i < _plants.length; i++) {
+    const plant = _plants[i];
+    if (!plant || !plant.position) continue;
+
+    const pp = plant.position;
+    const dx = pp.x - pos.x;
+    const dz = pp.z - pos.z;
+    const d2 = dx * dx + dz * dz;
+    if (d2 < nearestD2) {
+      nearestD2 = d2;
+      nearest = pp;
+    }
+  }
+
+  if (!nearest) return out;
+
+  out.set(nearest.x - pos.x, 0, nearest.z - pos.z);
+  const dist = Math.sqrt(nearestD2);
+  if (dist > 1e-4) {
+    const strength = 1.0 / (dist + 4.0); // 약간 더 강하게 끌리게
+    out.multiplyScalar(strength);
+  }
+
+  return out;
+}
+
+// ──────────────────────────────────────────────
 // 초기화: main.js에서 한 번만 호출
 // ──────────────────────────────────────────────
 export function initBoids({
   scene,
-  sampleTerrainHeight, // 지형 높이 샘플러
-  sampleWaterHeight, // 물 높이 샘플러
+  sampleTerrainHeight,
+  sampleWaterHeight,
+  plants = null,
   areaSize = 150,
   count = BOID_COUNT,
   modelPath = GLB_PATH,
@@ -144,6 +191,7 @@ export function initBoids({
   _scene = scene;
   _sampleTerrainHeight = sampleTerrainHeight;
   _sampleWaterHeight = sampleWaterHeight;
+  _plants = plants;
 
   const half = areaSize * 0.5;
 
@@ -168,7 +216,7 @@ export function initBoids({
       }
 
       for (let i = 0; i < count; i++) {
-        // ─ 초기 위치: "물 위"인 곳만 찾기 ─
+        // 초기 위치: 물 위만
         let x = 0,
           z = 0,
           waterY = 0,
@@ -183,7 +231,6 @@ export function initBoids({
           waterY = _sampleWaterHeight ? _sampleWaterHeight(x, z) : 0;
           terrainY = _sampleTerrainHeight ? _sampleTerrainHeight(x, z) : -9999;
 
-          // 섬(지형이 물 위로 튀어나온 곳)은 제외
           if (terrainY < waterY - 0.02) {
             found = true;
             break;
@@ -193,33 +240,32 @@ export function initBoids({
           waterY = _sampleWaterHeight(x, z);
         }
 
-        // GLB 인스턴스 생성 + 스케일
         const instance = cloneSkinned(baseScene);
         instance.scale.setScalar(BOID_SCALE);
 
-        // 바닥이 로컬 y=0에 오도록
         instance.position.set(0, 0, 0);
         instance.updateWorldMatrix(true, true);
         const box = new THREE.Box3().setFromObject(instance);
         const minY = box.min.y;
         instance.position.y -= minY;
 
-        // 래퍼 그룹
         const wrapper = new THREE.Group();
         wrapper.add(instance);
-        wrapper.position.set(x, waterY + 0.01, z); // 물 표면에 거의 딱 붙게
+        wrapper.position.set(x, waterY + 0.01, z);
+
+        wrapper.userData.isObstacle = true;
+        wrapper.userData.collisionRadius = BOID_SCALE * 0.5; // 대략 몸통 반지름
 
         _scene.add(wrapper);
         boidObjects.push(wrapper);
         boidPositions.push(wrapper.position);
 
-        // 초기 속도
+        // 초기 속도: 좀 더 세게
         const dir = new THREE.Vector3(randRange(-1, 1), 0, randRange(-1, 1));
         if (dir.lengthSq() < 1e-4) dir.set(1, 0, 0);
-        dir.normalize().multiplyScalar(randRange(1, 3));
+        dir.normalize().multiplyScalar(randRange(2.0, 4.0)); // 🔹 2~4
         boidVelocities.push(dir.clone());
 
-        // 애니메이션
         if (clip) {
           const mixer = new THREE.AnimationMixer(instance);
           const action = mixer.clipAction(clip);
@@ -231,7 +277,7 @@ export function initBoids({
       }
 
       _ready = true;
-      console.log(`[boids] loaded GLB & spawned ${count} boids (water nav)`);
+      console.log(`[boids] loaded GLB & spawned ${count} boids (water+plants)`);
     },
     undefined,
     (err) => {
@@ -250,14 +296,13 @@ export function updateBoids(dt) {
   if (count === 0) return;
 
   const NEIGHBOR_R2 = NEIGHBOR_RADIUS * NEIGHBOR_RADIUS;
-
   const acc = new Array(count);
   for (let i = 0; i < count; i++) {
     if (!acc[i]) acc[i] = new THREE.Vector3();
     acc[i].set(0, 0, 0);
   }
 
-  // 1) 이웃 기반 힘 계산
+  // 1) 이웃 + 식물 끌림 힘 계산
   for (let i = 0; i < count; i++) {
     const posI = boidPositions[i];
     const velI = boidVelocities[i];
@@ -318,11 +363,14 @@ export function updateBoids(dt) {
       );
     }
 
+    const plantForce = getPlantAttraction(posI);
+
     const steer = new THREE.Vector3()
       .addScaledVector(sep, W_SEP)
       .addScaledVector(coh, W_COH)
       .addScaledVector(ali, W_ALI)
-      .add(centerDir);
+      .add(centerDir)
+      .addScaledVector(plantForce, W_PLANT);
 
     if (steer.length() > MAX_FORCE) {
       steer.multiplyScalar(MAX_FORCE / steer.length());
@@ -331,50 +379,56 @@ export function updateBoids(dt) {
     acc[i].add(steer);
   }
 
-  // 2) 적분 + 워터 플레인 위로 스냅 + 섬 회피
-  const ISLAND_MARGIN = 0.02; // 지형이 물보다 이만큼 높으면 섬이라고 봄
+  // 2) 적분 + 워터 플레인 위로 스냅 + 섬 회피 + 최소 속도 보장
+  const ISLAND_MARGIN = 0.02;
 
   for (let i = 0; i < count; i++) {
     const wrapper = boidObjects[i];
-    const p = boidPositions[i]; // == wrapper.position
+    const p = boidPositions[i];
     const v = boidVelocities[i];
 
-    // 이전 위치 저장 (섬 충돌 시 롤백용)
     const prevX = p.x;
     const prevZ = p.z;
 
     // 속도 업데이트
     v.addScaledVector(acc[i], dt);
 
-    const speed = v.length();
+    let speed = v.length();
     if (speed > MAX_SPEED) v.multiplyScalar(MAX_SPEED / speed);
-    v.multiplyScalar(DAMPING);
 
-    // XZ 이동
+    // 🔹 속도가 너무 느리면 최소 속도까지 부스트
+    if (speed < MIN_SPEED) {
+      if (speed < 1e-4) {
+        // 완전히 멈췄으면 랜덤 방향 부여
+        v.set(randRange(-1, 1), 0, randRange(-1, 1)).normalize();
+        speed = 1.0;
+      }
+      v.multiplyScalar(MIN_SPEED / (speed + 1e-6));
+    }
+
+    if (DAMPING !== 1.0) {
+      v.multiplyScalar(DAMPING);
+    }
+
     p.x += v.x * dt;
     p.z += v.z * dt;
 
-    // 물 높이
     let waterY = _sampleWaterHeight ? _sampleWaterHeight(p.x, p.z) : 0;
 
-    // 섬(terrain > water) 체크
     let terrainY =
       _sampleTerrainHeight && _sampleTerrainHeight(p.x, p.z) != null
         ? _sampleTerrainHeight(p.x, p.z)
         : -9999;
 
     if (terrainY > waterY - ISLAND_MARGIN) {
-      // 섬에 올라타려고 하면 이전 위치로 롤백 + 속도 반사
       p.x = prevX;
       p.z = prevZ;
       v.x *= -0.5;
       v.z *= -0.5;
 
-      // 롤백 위치에서 다시 waterY 재계산
       waterY = _sampleWaterHeight ? _sampleWaterHeight(p.x, p.z) : waterY;
     }
 
-    // 주변 물 높이도 같이 보고, 가장 높은 곳에 살짝 띄우기
     if (_sampleWaterHeight) {
       const eps = 0.6;
       const h0 = _sampleWaterHeight(p.x + eps, p.z);
@@ -384,7 +438,6 @@ export function updateBoids(dt) {
       waterY = Math.max(waterY, h0, h1, h2, h3);
     }
 
-    // 노멀: 워터 플레인 기준
     const n = getWaterNormal(p.x, p.z);
 
     const qSlope = new THREE.Quaternion().setFromUnitVectors(
@@ -392,7 +445,6 @@ export function updateBoids(dt) {
       n
     );
 
-    // 진행 방향 yaw
     let qYaw = new THREE.Quaternion();
     if (v.lengthSq() > 1e-4) {
       const yaw = Math.atan2(v.x, v.z);
@@ -403,10 +455,8 @@ export function updateBoids(dt) {
 
     wrapper.quaternion.copy(qSlope).multiply(qYaw);
 
-    // 최종 y: 물 표면에 거의 딱 붙게
     p.y = waterY + 0.01;
 
-    // 애니메이션
     const mixer = mixers[i];
     if (mixer) mixer.update(dt);
   }

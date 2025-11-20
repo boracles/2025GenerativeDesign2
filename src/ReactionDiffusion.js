@@ -1,5 +1,7 @@
 import * as THREE from "three";
-import { GUI } from "lil-gui"; // ← lil-gui 추가 (npm i lil-gui)
+// ❌ import { GUI } from "lil-gui";
+// ✅ CDN ESM 버전으로 교체
+import { GUI } from "https://cdn.jsdelivr.net/npm/lil-gui@0.19/+esm";
 
 const hud = document.getElementById("hud");
 if (hud) {

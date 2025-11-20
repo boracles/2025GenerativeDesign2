@@ -1,4 +1,5 @@
 import * as THREE from "three";
+import { GUI } from "lil-gui"; // ← lil-gui 추가 (npm i lil-gui)
 
 const hud = document.getElementById("hud");
 if (hud) {
@@ -171,6 +172,7 @@ window.addEventListener("resize", () => {
   syncTiles(); // ⬅︎ 리사이즈마다 갱신
 });
 
+// reseed 함수
 function reseed() {
   // 1) init로 초기상태 만들기
   initMat.uniforms.uSeedShift.value = Math.random() * 1000.0;
@@ -191,21 +193,86 @@ function reseed() {
 // 여기에 reseed 호출
 reseed();
 
+// ======== GUI 설정 ========
+
+// 프레임당 iteration 수를 GUI로 조절할 수 있게
+const simParams = {
+  iters: 12,
+};
+
+const gui = new GUI();
+
+// 초기화 파라미터 폴더
+const initFolder = gui.addFolder("Init (Seed)");
+initFolder
+  .add(initMat.uniforms.uCells, "value", 10, 300, 1)
+  .name("uCells")
+  .onFinishChange(reseed);
+initFolder
+  .add(initMat.uniforms.uRadiusPx, "value", 1.0, 8.0, 0.1)
+  .name("uRadiusPx")
+  .onFinishChange(reseed);
+initFolder
+  .add(initMat.uniforms.uDensity, "value", 0.05, 1.0, 0.01)
+  .name("uDensity")
+  .onFinishChange(reseed);
+initFolder.add({ reseed }, "reseed").name("Reseed");
+
+// RD 파라미터 폴더
+const rdFolder = gui.addFolder("Reaction-Diffusion");
+rdFolder.add(updateMat.uniforms.uDu, "value", 0.0, 1.0, 0.005).name("Du");
+rdFolder.add(updateMat.uniforms.uDv, "value", 0.0, 1.0, 0.005).name("Dv");
+rdFolder.add(updateMat.uniforms.uF, "value", 0.0, 0.1, 0.0005).name("F (feed)");
+rdFolder.add(updateMat.uniforms.uK, "value", 0.0, 0.1, 0.0005).name("K (kill)");
+rdFolder.add(updateMat.uniforms.uDt, "value", 0.1, 2.0, 0.01).name("dt");
+
+// Voronoi / 스타일링 폴더
+const styleFolder = gui.addFolder("Style / Voronoi");
+styleFolder
+  .add(updateMat.uniforms.uVoronoiCells, "value", 4.0, 40.0, 1.0)
+  .name("VoronoiCells");
+styleFolder
+  .add(updateMat.uniforms.uJitter, "value", 0.0, 1.0, 0.01)
+  .name("Jitter");
+styleFolder
+  .add(updateMat.uniforms.uCenterBoost, "value", 0.0, 2.0, 0.01)
+  .name("CenterBoost");
+styleFolder
+  .add(updateMat.uniforms.uEdgeBoost, "value", 0.0, 2.0, 0.01)
+  .name("EdgeBoost");
+styleFolder
+  .add(updateMat.uniforms.uEdgeWidth, "value", 0.01, 0.5, 0.01)
+  .name("EdgeWidth");
+
+// Display 폴더
+const displayFolder = gui.addFolder("Display");
+displayFolder
+  .add(displayMat.uniforms.uPointRadiusPx, "value", 1.0, 10.0, 0.1)
+  .name("PointRadiusPx");
+displayFolder
+  .add(displayMat.uniforms.uAccentRatio, "value", 0.0, 1.0, 0.01)
+  .name("AccentRatio(Display)");
+displayFolder
+  .add(updateMat.uniforms.uAccentRatio, "value", 0.0, 1.0, 0.01)
+  .name("AccentRatio(RD)");
+
+// Simulation 폴더
+const simFolder = gui.addFolder("Simulation");
+simFolder.add(simParams, "iters", 1, 50, 1).name("Iterations/frame");
+
 // 6. 입력: R키로 재시드
 window.addEventListener("keydown", (e) => {
   if (e.key.toLowerCase() === "r") reseed();
 });
 
 // 7. 루프
-const ITERS = 12; // 5~10 사이 취향 조절
-
 renderer.setAnimationLoop(() => {
   // 천천히 지글거리게 feed에 약간의 공간노이즈
   const ns = updateMat.uniforms.uNoiseShift.value;
   ns.x += 0.0001;
   ns.y -= 0.00005;
 
-  for (let i = 0; i < ITERS; i++) {
+  for (let i = 0; i < simParams.iters; i++) {
     updateMat.uniforms.uState.value = ping.texture;
     renderer.setRenderTarget(pong);
     renderer.render(sceneUpdate, camera);
@@ -223,7 +290,8 @@ renderer.setAnimationLoop(() => {
 const btn = document.createElement("button");
 btn.textContent = "💾 Save PNG";
 btn.style.position = "fixed";
-btn.style.top = "10px";
+// HUD가 10px에 있으니까 버튼은 조금 아래로
+btn.style.top = "40px";
 btn.style.right = "10px";
 btn.style.zIndex = "1001";
 btn.style.padding = "6px 10px";

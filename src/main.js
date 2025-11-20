@@ -316,8 +316,8 @@ function alignToSlope(obj) {
 
 initBoids({
   scene,
-  sampleTerrainHeight,
-  sampleWaterHeight,
+  sampleTerrainHeight: sampleTerrainHeight, // 🔥 진짜 지형 높이!
+  sampleWaterHeight: sampleWaterHeight,
   plants, // ★ 추가: 같은 배열 참조
   character: characterRoot,
   areaSize: 160,
@@ -421,20 +421,19 @@ spawnWeirdPlants(
 const clock = new THREE.Clock();
 
 function animate() {
-  const t = clock.getElapsedTime();
-  const dt = clock.getDelta();
+  const dt = clock.getDelta(); // ✅ 먼저 delta 뽑고
+  const t = clock.elapsedTime; // ✅ elapsedTime은 프로퍼티로 읽기
+
   if (tickUniforms) tickUniforms.uTime.value = t;
 
   updateMovement(dt);
 
-  // 각 식물: 핀 고정 + 경사 정렬 + 개별 스웨이
   for (const p of plants) {
     p.position.y = sampleTerrainHeight(p.position.x, p.position.z);
     alignToSlope(p);
     updateWeirdPlantInstance(p, dt);
   }
 
-  // 🔹 GLB boids 업데이트
   updateBoids(dt);
 
   controls.update();

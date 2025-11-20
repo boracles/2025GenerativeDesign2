@@ -15,7 +15,7 @@ let _lastSafeY = 0; // 마지막 안전 y
 let _terrainAABBWorld = null;
 let _clampMargin = 0;
 let _heightSampler = null; // (x,z) => height(nav)
-let _speed = 16; // 이동 속도 (유닛/초)
+let _speed = 2; // 이동 속도 (유닛/초)
 let _arriveEps = 0.1; // 도착 판정
 let _heightOffset = 0; // 지면 위 떠 있는 높이
 let _slopeAlign = 0.35; // (지금은 회전에는 안 씀)

@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>My Three.js Project</title>
+    <link rel="icon" href="data:," />
+    <style>
+      :root {
+        color-scheme: dark;
+      }
+      html,
+      body {
+        height: 100%;
+      }
+      body {
+        margin: 0;
+        background: #ffffff;
+        color: #ffffff;
+        overflow: hidden;
+        font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto,
+          Helvetica, Arial;
+      }
+      #hud {
+        position: fixed;
+        left: 12px;
+        top: 10px;
+        font-size: 12px;
+        opacity: 0.85;
+      }
+    </style>
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+          "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+        }
+      }
+    </script>
+  </head>
+  <body>
+    <div id="hud"></div>
+
+    <!-- 여기서 Week2.js 로드 -->
+    <script type="module" src="./src/ReactionDiffusion.js"></script>
+  </body>
+</html>

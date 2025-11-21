@@ -13,12 +13,23 @@ import {
   setTerrainHeightSampler,
 } from "./movement.js";
 import {
-  createWeirdPlantRoot,
-  // updateWeirdPlant,
   createWeirdPlantInstance,
   updateWeirdPlantInstance,
 } from "./lsystem.js";
-import { initBoids, updateBoids } from "./boids.js";
+
+import {
+  initBoids,
+  updateBoids,
+  applyPopulationGenomes,
+  markSelection,
+  markNewborn,
+} from "./boids.js";
+
+import {
+  GeneticAlgorithm,
+  DEATH_ANIM_DURATION,
+  NEWBORN_ANIM_DURATION,
+} from "./ga.js";
 
 /* =============== 기본 장면 =============== */
 const scene = new THREE.Scene();
@@ -35,7 +46,7 @@ camera.lookAt(0, 0, 0);
 const renderer = new THREE.WebGLRenderer({ antialias: true });
 
 // 🔹 배경색 설정
-renderer.setClearColor(0x0f2c39, 1); // #820A26
+renderer.setClearColor(0x0f2c39, 1); // #0f2c39
 
 renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 renderer.setSize(window.innerWidth, window.innerHeight);
@@ -68,8 +79,11 @@ console.log("[main] characterRoot.uuid =", characterRoot.uuid);
 
 const plants = []; // 보이드와 식물이 같이 공유하는 배열
 
-/* =============== 물결치는 평면 (워터 플레인) =============== */
+// 세대 전환 시, 죽은 애들 잠잠해진 뒤
+// "살아남은 40%"만 잠깐 보여주는 시간(초)
+const SURVIVORS_WINDOW = 1.5;
 
+/* =============== 물결치는 평면 (워터 플레인) =============== */
 // 지형과 같은 크기 사용 (terrain.js의 size=200 기준)
 const waterSize = 200;
 const waterSegs = 128;
@@ -284,58 +298,18 @@ tickUniforms.uFreq.value = 0.05;
 renderer.domElement.style.pointerEvents = "auto";
 controls.enabled = true;
 
-/* =============== 리사이즈 =============== */
-window.addEventListener("resize", () => {
-  const w = window.innerWidth;
-  const h = window.innerHeight;
-  camera.aspect = w / h;
-  camera.updateProjectionMatrix();
-  renderer.setSize(w, h);
-});
-
-function alignToSlope(obj) {
-  const p = obj.position;
-  const eps = 0.5;
-
-  const hC = sampleTerrainHeight(p.x, p.z);
-  const hX = sampleTerrainHeight(p.x + eps, p.z);
-  const hZ = sampleTerrainHeight(p.x, p.z + eps);
-
-  const tx = new THREE.Vector3(eps, hX - hC, 0);
-  const tz = new THREE.Vector3(0, hZ - hC, eps);
-
-  const n = new THREE.Vector3().crossVectors(tx, tz).normalize();
-  if (n.y < 0) n.negate();
-
-  const q = new THREE.Quaternion().setFromUnitVectors(
-    new THREE.Vector3(0, 1, 0),
-    n
-  );
-  obj.quaternion.copy(q);
-}
-
-initBoids({
-  scene,
-  sampleTerrainHeight: sampleTerrainHeight, // 🔥 진짜 지형 높이!
-  sampleWaterHeight: sampleWaterHeight,
-  plants, // ★ 추가: 같은 배열 참조
-  character: characterRoot,
-  areaSize: 160,
-  count: 40,
-  modelPath: "./assets/models/creature.glb",
-  clipName: "FeedingTentacle_WaveTest",
-});
-
+/* =============== 랜덤 함수 =============== */
 function randRange(min, max) {
   return Math.random() * (max - min) + min;
 }
 
+/* =============== 식물 스폰 =============== */
 function spawnWeirdPlants(
   count = 200,
   areaSize = 180,
   scaleMin = 1.0,
   scaleMax = 6.0,
-  waterY = 0.0, // 🔹 수면 높이 전달
+  waterY = 0.0, // 수면 높이 전달
   margin = 0.08
 ) {
   const half = areaSize * 0.5;
@@ -414,17 +388,257 @@ spawnWeirdPlants(
   180, // 배치 영역 한 변 길이
   1.6, // 최소 스케일
   3.2,
-  waterPlane.position.y, // 🔹 수면 높이
-  0.12 // 🔹 수면 위로 최소 5cm 정도 나오게
+  waterPlane.position.y, // 수면 높이
+  0.12 // 수면 위로 최소 margin
 );
 
+/* =============== GA 세팅 =============== */
+
+/* =============== GA 세팅 =============== */
+
+// ★ 40마리를 5타입으로 균등 분배하기 위한 슬롯 패턴 배열
+//   (0~7: pattern 0, 8~15: pattern 1, ... 32~39: pattern 4)
+const POP_SIZE = 40;
+const slotPatternIds = new Array(POP_SIZE);
+for (let i = 0; i < POP_SIZE; i++) {
+  slotPatternIds[i] = Math.floor((i / POP_SIZE) * 5); // 0~4
+}
+
+// GA 인스턴스 생성 (populationSize는 보이드 개수와 맞춘다)
+const ga = new GeneticAlgorithm({
+  populationSize: POP_SIZE,
+  survivalRate: 0.4,
+  mutationRate: 0.15,
+  crossoverRate: 0.9,
+  slotPatternIds, // ★ index별 고정 패턴 전달
+});
+
+ga.initPopulation();
+const initialPopulation = ga.getPopulation();
+
+// Boids 초기화 시, 초기 Genome을 같이 넘겨준다.
+initBoids({
+  scene,
+  sampleTerrainHeight: sampleTerrainHeight,
+  sampleWaterHeight: sampleWaterHeight,
+  plants,
+  character: characterRoot,
+  areaSize: 160,
+  count: initialPopulation.length,
+  modelPath: "./assets/models/creature.glb",
+  clipName: "FeedingTentacle_WaveTest",
+  initialGenomes: initialPopulation,
+});
+
+// ★ 먼저 세대 관련 상태 변수를 선언하고
+let currentGeneration = 0;
+let generationTimer = 0;
+let pendingNextGen = false;
+
+const guiState = {
+  autoRun: true,
+  generationDuration: 10, // 초
+  generationLabel: () => currentGeneration,
+};
+
+const generationHud = document.createElement("div");
+generationHud.style.position = "fixed";
+generationHud.style.top = "10px";
+generationHud.style.left = "10px";
+generationHud.style.padding = "4px 8px";
+generationHud.style.background = "rgba(0, 0, 0, 0.5)";
+generationHud.style.color = "#ffffff";
+generationHud.style.fontFamily = "monospace";
+generationHud.style.fontSize = "14px";
+generationHud.style.zIndex = "1000";
+generationHud.textContent = `Generation: ${currentGeneration}`;
+document.body.appendChild(generationHud);
+
+function updateGenerationHUD() {
+  generationHud.textContent = `Generation: ${currentGeneration}`;
+}
+updateGenerationHUD();
+
+// 🔥 살아남은 개체 특징 요약 HUD
+const survivorHud = document.createElement("div");
+survivorHud.style.position = "fixed";
+survivorHud.style.top = "40px"; // generationHud 바로 아래
+survivorHud.style.left = "10px";
+survivorHud.style.padding = "4px 8px";
+survivorHud.style.background = "rgba(0, 0, 0, 0.5)";
+survivorHud.style.color = "#ffffff";
+survivorHud.style.fontFamily = "monospace";
+survivorHud.style.fontSize = "12px";
+survivorHud.style.zIndex = "1000";
+survivorHud.textContent = "Survivors: -";
+document.body.appendChild(survivorHud);
+
+/**
+ * 살아남은 개체들의 특징을 요약해서 survivorHud에 표시한다.
+ * survivors: GA.evaluatePopulation()에서 받은 survivorIndices 배열
+ */
+function updateSurvivorHUD(survivors) {
+  const pop = ga.getPopulation();
+  if (!pop || pop.length === 0) {
+    survivorHud.textContent = "Survivors: -";
+    return;
+  }
+
+  const indices =
+    Array.isArray(survivors) && survivors.length > 0
+      ? survivors
+      : pop.map((_, i) => i); // 없으면 전체 기준
+
+  const n = indices.length;
+  if (n === 0) {
+    survivorHud.textContent = "Survivors: 0";
+    return;
+  }
+
+  // 패턴 분포 / 평균 크기 / 평균 속도 / 평균 showOff
+  const patternCounts = [0, 0, 0, 0, 0]; // 0~4
+  let sumScale = 0;
+  let sumSpeed = 0;
+  let sumShow = 0;
+
+  for (const idx of indices) {
+    const g = pop[idx];
+    if (!g) continue;
+
+    const pid = Math.max(0, Math.min(4, g.patternId | 0));
+    patternCounts[pid]++;
+
+    sumScale += g.bodyScale;
+    sumSpeed += g.baseSpeed;
+    sumShow += g.showOff;
+  }
+
+  const avgScale = (sumScale / n).toFixed(2);
+  const avgSpeed = (sumSpeed / n).toFixed(2);
+  const avgShow = (sumShow / n).toFixed(2);
+
+  // 패턴 분포를 간단히 텍스트로 (예: P0:3 P1:5 P2:4 ...)
+  const patternSummary = patternCounts
+    .map((c, i) => (c > 0 ? `P${i}:${c}` : null))
+    .filter(Boolean)
+    .join(" ");
+
+  survivorHud.textContent = `Survivors(${n}): ${patternSummary} | scale≈${avgScale} | speed≈${avgSpeed} | show≈${avgShow}`;
+}
+
+function triggerNextGeneration() {
+  if (pendingNextGen) return;
+
+  // 1) 평가 + 생존/도태 결정
+  const evalResult = ga.evaluatePopulation();
+  const survivors = evalResult.survivorIndices;
+  const doomed = evalResult.doomedIndices;
+
+  // 🔥 이 세대에서 살아남은 개체들의 특징을 HUD에 요약
+  updateSurvivorHUD(survivors);
+
+  // 2) 시각화: doomed → dying 상태로 전환
+  //    (DEATH_ANIM_DURATION 동안 천천히 작아지고 어두워지며 가라앉음)
+  markSelection(survivors, doomed, DEATH_ANIM_DURATION);
+
+  // 3) 죽는 애니메이션 동안은 아무 것도 안 하고 기다렸다가
+  //    → 그 다음에 "살아남은 40%만" 잠깐 보여주고
+  //    → 다시 그 다음에 새 세대를 스폰
+  pendingNextGen = true;
+
+  // 3-1) 먼저 죽는 애니메이션이 끝날 때까지 대기
+  setTimeout(() => {
+    // 이 시점부터는 doomed가 전부 dead + invisible 상태
+    // ⇒ 화면에는 survivor 40%만 보이는 구간 시작
+
+    // 3-2) SURVIVORS_WINDOW 동안 "살아남은 40%"만 보여줌
+    setTimeout(() => {
+      // 이제 다음 세대 생성
+      ga.nextGeneration();
+      currentGeneration = ga.generation;
+
+      const newPop = ga.getPopulation();
+
+      // 🔥 죽었던 슬롯에만 새 genome 적용 (자식들)
+      applyPopulationGenomes(newPop, doomed);
+
+      // 방금 죽었던 슬롯들은 newborn 연출
+      markNewborn(doomed, NEWBORN_ANIM_DURATION);
+
+      pendingNextGen = false;
+      updateGenerationHUD();
+    }, SURVIVORS_WINDOW * 1000);
+  }, DEATH_ANIM_DURATION * 1000);
+}
+
+// lil-gui (UMD) 전제: index.html에서 <script src="...lil-gui.umd.min.js"></script>
+if (window.lil && window.lil.GUI) {
+  const gui = new window.lil.GUI();
+  const f = gui.addFolder("Genetic Algorithm");
+
+  f.add(guiState, "autoRun").name("Auto Run");
+  f.add(guiState, "generationDuration", 1, 60, 1).name("Generation (sec)");
+  f.add({ next: () => triggerNextGeneration() }, "next").name(
+    "Next Generation"
+  );
+  f.add(guiState, "generationLabel").name("Generation").listen();
+
+  f.open();
+} else {
+  console.warn(
+    "[main] lil-gui not found. GA GUI disabled. (index.html에 UMD 스크립트 추가 필요)"
+  );
+}
+
+/* =============== 리사이즈 =============== */
+window.addEventListener("resize", () => {
+  const w = window.innerWidth;
+  const h = window.innerHeight;
+  camera.aspect = w / h;
+  camera.updateProjectionMatrix();
+  renderer.setSize(w, h);
+});
+
+function alignToSlope(obj) {
+  const p = obj.position;
+  const eps = 0.5;
+
+  const hC = sampleTerrainHeight(p.x, p.z);
+  const hX = sampleTerrainHeight(p.x + eps, p.z);
+  const hZ = sampleTerrainHeight(p.x, p.z + eps);
+
+  const tx = new THREE.Vector3(eps, hX - hC, 0);
+  const tz = new THREE.Vector3(0, hZ - hC, eps);
+
+  const n = new THREE.Vector3().crossVectors(tx, tz).normalize();
+  if (n.y < 0) n.negate();
+
+  const q = new THREE.Quaternion().setFromUnitVectors(
+    new THREE.Vector3(0, 1, 0),
+    n
+  );
+  obj.quaternion.copy(q);
+}
+
+/* =============== 메인 루프 =============== */
 const clock = new THREE.Clock();
 
 function animate() {
-  const dt = clock.getDelta(); // ✅ 먼저 delta 뽑고
-  const t = clock.elapsedTime; // ✅ elapsedTime은 프로퍼티로 읽기
+  const dt = clock.getDelta();
+  const t = clock.elapsedTime;
 
   if (tickUniforms) tickUniforms.uTime.value = t;
+
+  // GA auto-run 타이머
+  generationTimer += dt;
+  if (
+    guiState.autoRun &&
+    !pendingNextGen &&
+    generationTimer >= guiState.generationDuration
+  ) {
+    generationTimer = 0;
+    triggerNextGeneration();
+  }
 
   updateMovement(dt);
 

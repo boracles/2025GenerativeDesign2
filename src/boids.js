@@ -9,8 +9,8 @@ const CLIP_NAME = "FeedingTentacle_WaveTest";
 
 const BOID_COUNT = 40;
 const NEIGHBOR_RADIUS = 18;
-const MAX_SPEED = 6.0;
-const MIN_SPEED = 1.6;
+const MAX_SPEED_GLOBAL = 6.0; // 전역 상한
+const MIN_SPEED_GLOBAL = 1.6; // 전역 하한
 const MAX_FORCE = 8.0;
 const DAMPING = 1.0;
 
@@ -55,27 +55,48 @@ const TERRAIN_EPS = 0.8;
 const TERRAIN_MARGIN = 2.0;
 const LAND_CHECK_RADIUS = 2.2;
 
+// 생존 시각화 상수
+const SURVIVAL_RATE = 0.4; // (실제 GA에서도 사용됨)
+const DEATH_ANIM_DURATION = 2.0; // dying -> dead
+const NEWBORN_ANIM_DURATION = 1.0; // newborn -> alive
+
+// showOff 연동용
+const SHOWOFF_ROLL_AMP = 0.3;
+const SHOWOFF_BOB_AMP = 0.04;
+
 // 임시 벡터
 const _terrainForceTemp = new THREE.Vector3();
 const _plantForceTemp = new THREE.Vector3();
 const _plantAvoidTemp = new THREE.Vector3();
 const _pollenForceTemp = new THREE.Vector3();
 const _tmpApexWorld = new THREE.Vector3();
+const _tmpColor = new THREE.Color();
 
-// ===== RD 텍스처 =====
-const RD_URL = "./assets/textures/rd_pattern.png";
+// ───────────────────────────────
+// RD 텍스처 5종 로드
+// ───────────────────────────────
+const RD_TEXTURE_PATHS = [
+  "./assets/textures/rd_pattern.png", // patternId 0
+  "./assets/textures/rd_pattern2.png", // patternId 1
+  "./assets/textures/rd_pattern3.png", // patternId 2
+  "./assets/textures/rd_pattern4.png", // patternId 3
+  "./assets/textures/rd_pattern5.png", // patternId 4
+];
+
 const textureLoader = new THREE.TextureLoader();
-const rdTexture = textureLoader.load(RD_URL, (tex) => {
+const rdTextures = RD_TEXTURE_PATHS.map((path) => {
+  const tex = textureLoader.load(path);
   tex.flipY = false;
   tex.colorSpace = THREE.SRGBColorSpace;
   tex.wrapS = THREE.RepeatWrapping;
   tex.wrapT = THREE.RepeatWrapping;
   tex.repeat.set(1, 1);
+  return tex;
 });
 
-// RD 머티리얼 적용
-function applyRDMaterial(root, tex) {
-  if (!tex) return;
+// RD 머티리얼 적용: GLB 메쉬를 MeshStandardMaterial로 통일해두고,
+// 색/패턴은 이후 Genome에 의해 결정된다.
+function applyRDMaterial(root) {
   root.traverse((obj) => {
     if (!obj.isMesh) return;
     const geom = obj.geometry;
@@ -85,7 +106,7 @@ function applyRDMaterial(root, tex) {
     const oldMat = obj.material;
 
     obj.material = new THREE.MeshStandardMaterial({
-      map: tex,
+      map: null,
       roughness: 0.8,
       metalness: 0.1,
       vertexColors: hasVertexColors,
@@ -96,17 +117,32 @@ function applyRDMaterial(root, tex) {
   });
 }
 
-// ===== 내부 상태 =====
-let boidObjects = [];
-let boidPositions = [];
-let boidVelocities = [];
+// ───────────────────────────────
+// 내부 상태
+// ───────────────────────────────
+let boidObjects = []; // THREE.Group (wrapper)
+let boidPositions = []; // Vector3 (wrapper.position 참조)
+let boidVelocities = []; // Vector3
 let mixers = [];
+
+let boidStates = []; // "alive" | "dying" | "dead" | "newborn"
+let boidDeathTimers = [];
+let boidNewbornTimers = [];
+let boidBaseScales = []; // Genome.bodyScale
+let boidMaxSpeeds = []; // Genome.baseSpeed
+let boidMinSpeeds = []; // Genome.baseSpeed * 0.4
+let boidShowOffIntensities = [];
+let boidBaseColors = [];
 
 let _sampleTerrainHeight = null;
 let _sampleWaterHeight = null;
 let _plants = null;
 let _character = null;
 let _ready = false;
+
+let _timeAccum = 0;
+let _deathDuration = DEATH_ANIM_DURATION;
+let _newbornDuration = NEWBORN_ANIM_DURATION;
 
 // 유틸
 const randRange = (min, max) => Math.random() * (max - min) + min;
@@ -291,6 +327,49 @@ function getPollenAttraction(pos) {
 }
 
 // ───────────────────────────────
+// Genome → Boid 적용 헬퍼
+// ───────────────────────────────
+
+// ⬇️ color 파라미터 제거, mat.color는 건드리지 않고 텍스처만 설정
+function applyColorAndTextureToWrapper(wrapper, patternId) {
+  const pid = THREE.MathUtils.clamp(patternId | 0, 0, rdTextures.length - 1);
+  const tex = rdTextures[pid];
+
+  wrapper.traverse((obj) => {
+    if (!obj.isMesh) return;
+    const mat = obj.material;
+    if (!mat || !mat.isMeshStandardMaterial) return;
+    mat.map = tex;
+    mat.needsUpdate = true;
+  });
+}
+
+/**
+ * genome: { hue, value, patternId, bodyScale, baseSpeed, showOff }
+ */
+function applyGenomeToBoid(index, genome) {
+  const wrapper = boidObjects[index];
+  if (!wrapper) return;
+
+  // genome 정보만 저장 (색은 머티리얼에 반영하지 않음)
+  wrapper.userData.genome = genome;
+
+  // 크기
+  boidBaseScales[index] = genome.bodyScale;
+  wrapper.scale.setScalar(genome.bodyScale);
+
+  // 속도 / showOff
+  boidMaxSpeeds[index] = genome.baseSpeed;
+  boidMinSpeeds[index] = genome.baseSpeed * 0.4;
+  boidShowOffIntensities[index] = genome.showOff;
+
+  wrapper.visible = true;
+
+  // 텍스처만 genome.patternId로 선택
+  applyColorAndTextureToWrapper(wrapper, genome.patternId);
+}
+
+// ───────────────────────────────
 // 초기화
 // ───────────────────────────────
 export function initBoids({
@@ -303,6 +382,7 @@ export function initBoids({
   count = BOID_COUNT,
   modelPath = GLB_PATH,
   clipName = CLIP_NAME,
+  initialGenomes = null, // ★ GA에서 넘기는 초기 Genome 배열
 }) {
   _sampleTerrainHeight = sampleTerrainHeight;
   _sampleWaterHeight = sampleWaterHeight;
@@ -316,12 +396,21 @@ export function initBoids({
   boidVelocities = [];
   mixers = [];
 
+  boidStates = [];
+  boidDeathTimers = [];
+  boidNewbornTimers = [];
+  boidBaseScales = [];
+  boidMaxSpeeds = [];
+  boidMinSpeeds = [];
+  boidShowOffIntensities = [];
+  boidBaseColors = [];
+
   const loader = new GLTFLoader();
   loader.load(
     modelPath,
     (gltf) => {
       const baseScene = gltf.scene;
-      applyRDMaterial(baseScene, rdTexture);
+      applyRDMaterial(baseScene);
 
       const clips = gltf.animations || [];
       const clip =
@@ -351,6 +440,18 @@ export function initBoids({
         }
 
         const instance = cloneSkinned(baseScene);
+
+        // 🔥 각 인스턴스마다 material을 복제해서 "머티리얼 공유" 끊기
+        instance.traverse((obj) => {
+          if (!obj.isMesh || !obj.material) return;
+
+          if (Array.isArray(obj.material)) {
+            obj.material = obj.material.map((m) => m.clone());
+          } else {
+            obj.material = obj.material.clone();
+          }
+        });
+
         instance.scale.setScalar(BOID_SCALE);
         instance.position.set(0, 0, 0);
         instance.updateWorldMatrix(true, true);
@@ -361,6 +462,7 @@ export function initBoids({
         const wrapper = new THREE.Group();
         wrapper.add(instance);
         wrapper.position.set(x, waterY + 0.01, z);
+        wrapper.userData.boidIndex = i;
 
         wrapper.userData.isObstacle = true;
         wrapper.userData.collisionRadius = BOID_SCALE * 0.5;
@@ -373,6 +475,15 @@ export function initBoids({
           .multiplyScalar(randRange(2.0, 4.0));
         boidVelocities.push(dir);
 
+        boidStates[i] = "alive";
+        boidDeathTimers[i] = 0;
+        boidNewbornTimers[i] = 0;
+        boidBaseScales[i] = BOID_SCALE;
+        boidMaxSpeeds[i] = MAX_SPEED_GLOBAL;
+        boidMinSpeeds[i] = MIN_SPEED_GLOBAL;
+        boidShowOffIntensities[i] = 0;
+        boidBaseColors[i] = new THREE.Color(0.8, 0.8, 0.8);
+
         if (clip) {
           const mixer = new THREE.AnimationMixer(instance);
           mixer.clipAction(clip).play();
@@ -384,12 +495,92 @@ export function initBoids({
         scene.add(wrapper);
       }
 
+      // GA에서 넘어온 초기 유전자 적용
+      if (Array.isArray(initialGenomes)) {
+        const n = Math.min(initialGenomes.length, boidObjects.length);
+        for (let i = 0; i < n; i++) {
+          applyGenomeToBoid(i, initialGenomes[i]);
+        }
+      }
+
       _ready = true;
       console.log("[boids] loaded GLB & spawned", count);
     },
     undefined,
     (err) => console.error("[boids] GLB load error:", modelPath, err)
   );
+}
+
+// ───────────────────────────────
+// 외부에서 GA 새 population 적용
+// ───────────────────────────────
+// population: GA.getPopulation() 배열
+// indices: [0, 5, 12, ...] 처럼 “이 슬롯들만” 업데이트하고 싶을 때 사용 (생략 가능)
+export function applyPopulationGenomes(population, indices = null) {
+  if (!population || !population.length) return;
+
+  const n = Math.min(population.length, boidObjects.length);
+
+  // indices가 주어지면 그 슬롯만 갱신
+  if (Array.isArray(indices) && indices.length > 0) {
+    for (const idx of indices) {
+      if (idx == null) continue;
+      if (idx < 0 || idx >= n) continue;
+      applyGenomeToBoid(idx, population[idx]);
+    }
+    return;
+  }
+
+  // indices가 없으면 모든 슬롯에 적용 (초기 0세대 때만 사용)
+  for (let i = 0; i < n; i++) {
+    applyGenomeToBoid(i, population[i]);
+  }
+}
+
+// ───────────────────────────────
+// 생존/도태 시각화용 마킹
+// ───────────────────────────────
+export function markSelection(
+  survivorIndices,
+  doomedIndices,
+  deathDuration = DEATH_ANIM_DURATION
+) {
+  _deathDuration = deathDuration;
+
+  if (Array.isArray(doomedIndices)) {
+    for (const idx of doomedIndices) {
+      if (idx == null || !boidObjects[idx]) continue;
+      boidStates[idx] = "dying";
+      boidDeathTimers[idx] = 0;
+      boidNewbornTimers[idx] = 0;
+    }
+  }
+
+  if (Array.isArray(survivorIndices)) {
+    for (const idx of survivorIndices) {
+      if (idx == null || !boidObjects[idx]) continue;
+      // 살짝 강조 (스케일 살짝 키웠다가, update에서 원래 값으로 복귀)
+      const base = boidBaseScales[idx] || 1.0;
+      boidObjects[idx].scale.setScalar(base * 1.05);
+    }
+  }
+}
+
+export function markNewborn(indices, newbornDuration = NEWBORN_ANIM_DURATION) {
+  _newbornDuration = newbornDuration;
+
+  if (!Array.isArray(indices)) return;
+  for (const idx of indices) {
+    if (idx == null || !boidObjects[idx]) continue;
+    boidStates[idx] = "newborn";
+    boidNewbornTimers[idx] = 0;
+    boidDeathTimers[idx] = 0;
+
+    const base = boidBaseScales[idx] || 1.0;
+    // 처음에는 아주 작게 시작
+    boidObjects[idx].visible = true;
+    boidObjects[idx].scale.setScalar(base * 0.2);
+  }
 }
 
 // ───────────────────────────────
@@ -401,6 +592,62 @@ export function updateBoids(dt) {
   const count = boidObjects.length;
   if (count === 0) return;
 
+  _timeAccum += dt;
+
+  // 상태별 타이머/애니메이션 업데이트
+  for (let i = 0; i < count; i++) {
+    const state = boidStates[i];
+    const wrapper = boidObjects[i];
+    if (!wrapper) continue;
+
+    const baseScale = boidBaseScales[i] || BOID_SCALE;
+    const baseColor = boidBaseColors[i] || new THREE.Color(0.8, 0.8, 0.8);
+
+    if (state === "dying") {
+      boidDeathTimers[i] += dt;
+      const t = THREE.MathUtils.clamp(
+        boidDeathTimers[i] / (_deathDuration || DEATH_ANIM_DURATION),
+        0,
+        1
+      );
+
+      // scale 1.0 → 0.2
+      const s = THREE.MathUtils.lerp(1.0, 0.2, t);
+      wrapper.scale.setScalar(baseScale * s);
+
+      if (boidDeathTimers[i] >= (_deathDuration || DEATH_ANIM_DURATION)) {
+        boidStates[i] = "dead";
+        wrapper.visible = false;
+        if (boidVelocities[i]) {
+          boidVelocities[i].set(0, 0, 0);
+        }
+      }
+    } else if (state === "newborn") {
+      boidNewbornTimers[i] += dt;
+      const t = THREE.MathUtils.clamp(
+        boidNewbornTimers[i] / (_newbornDuration || NEWBORN_ANIM_DURATION),
+        0,
+        1
+      );
+      const s = THREE.MathUtils.lerp(0.2, 1.0, t);
+      wrapper.scale.setScalar(baseScale * s);
+
+      wrapper.visible = true;
+
+      if (boidNewbornTimers[i] >= (_newbornDuration || NEWBORN_ANIM_DURATION)) {
+        boidStates[i] = "alive";
+        wrapper.scale.setScalar(baseScale);
+      }
+    } else if (state === "dead") {
+      wrapper.visible = false;
+    } else {
+      // alive: 기본 스케일/색상 유지
+      wrapper.visible = true;
+      wrapper.scale.setScalar(baseScale);
+    }
+  }
+
+  // 가속도 배열
   const acc = new Array(count);
   for (let i = 0; i < count; i++) {
     acc[i] = new THREE.Vector3();
@@ -410,6 +657,8 @@ export function updateBoids(dt) {
 
   // 1) force 계산
   for (let i = 0; i < count; i++) {
+    if (boidStates[i] === "dead") continue; // 죽은 보이드는 무시
+
     const posI = boidPositions[i];
 
     const sep = new THREE.Vector3();
@@ -420,6 +669,8 @@ export function updateBoids(dt) {
 
     for (let j = 0; j < count; j++) {
       if (i === j) continue;
+      if (boidStates[j] === "dead") continue; // 죽은 개체는 이웃에서 제외
+
       const posJ = boidPositions[j];
 
       const dx = posJ.x - posI.x;
@@ -524,6 +775,8 @@ export function updateBoids(dt) {
   const SUBSTEPS = 6;
 
   for (let i = 0; i < count; i++) {
+    if (boidStates[i] === "dead") continue; // dead는 움직이지 않음
+
     const wrapper = boidObjects[i];
     const p = boidPositions[i];
     const v = boidVelocities[i];
@@ -534,14 +787,20 @@ export function updateBoids(dt) {
     v.addScaledVector(acc[i], dt);
 
     let speed = v.length();
-    if (speed > MAX_SPEED) v.multiplyScalar(MAX_SPEED / speed);
+    const maxSpeed = Math.min(
+      boidMaxSpeeds[i] || MAX_SPEED_GLOBAL,
+      MAX_SPEED_GLOBAL
+    );
+    const minSpeed = Math.max(boidMinSpeeds[i] || MIN_SPEED_GLOBAL, 0.1);
 
-    if (speed < MIN_SPEED) {
+    if (speed > maxSpeed) v.multiplyScalar(maxSpeed / speed);
+
+    if (speed < minSpeed) {
       if (speed < 1e-4) {
         v.set(randRange(-1, 1), 0, randRange(-1, 1)).normalize();
         speed = 1.0;
       }
-      v.multiplyScalar(MIN_SPEED / (speed + 1e-6));
+      v.multiplyScalar(minSpeed / (speed + 1e-6));
     }
 
     if (DAMPING !== 1.0) v.multiplyScalar(DAMPING);
@@ -561,7 +820,7 @@ export function updateBoids(dt) {
         const inward = new THREE.Vector3(-testX, 0, -testZ).normalize();
         v.copy(
           inward.multiplyScalar(
-            Math.max(MIN_SPEED * 1.2, v.length() || MIN_SPEED)
+            Math.max(minSpeed * 1.2, v.length() || minSpeed)
           )
         );
         break;
@@ -607,13 +866,13 @@ export function updateBoids(dt) {
           avoidDir.normalize();
           v.copy(
             avoidDir.multiplyScalar(
-              Math.max(MIN_SPEED * 1.4, v.length() || MIN_SPEED)
+              Math.max(minSpeed * 1.4, v.length() || minSpeed)
             )
           );
         } else {
           v.set(randRange(-1, 1), 0, randRange(-1, 1))
             .normalize()
-            .multiplyScalar(MIN_SPEED * 1.4);
+            .multiplyScalar(minSpeed * 1.4);
         }
       }
     }
@@ -623,6 +882,7 @@ export function updateBoids(dt) {
       p.addScaledVector(avoid, 1.6);
     }
 
+    // 수면 노멀 + 진행 방향으로 기울이기
     const n = getWaterNormal(p.x, p.z);
     const qSlope = new THREE.Quaternion().setFromUnitVectors(
       new THREE.Vector3(0, 1, 0),
@@ -638,7 +898,27 @@ export function updateBoids(dt) {
     }
 
     wrapper.quaternion.copy(qSlope).multiply(qYaw);
-    p.y = waterY + 0.01;
+
+    // showOff 기반 롤링/바운스
+    const showOff = boidShowOffIntensities[i] || 0;
+    if (showOff > 0) {
+      const norm = THREE.MathUtils.clamp(showOff / 8.0, 0.0, 1.0);
+      const rollAngle =
+        Math.sin(_timeAccum * (1.5 + norm * 3.0) + i) * SHOWOFF_ROLL_AMP * norm;
+      const qRoll = new THREE.Quaternion().setFromAxisAngle(
+        new THREE.Vector3(0, 0, 1),
+        rollAngle
+      );
+      wrapper.quaternion.multiply(qRoll);
+
+      const bobOffset =
+        Math.sin(_timeAccum * (1.0 + norm * 2.0) + i * 0.7) *
+        SHOWOFF_BOB_AMP *
+        norm;
+      p.y = waterY + 0.01 + bobOffset;
+    } else {
+      p.y = waterY + 0.01;
+    }
 
     const mixer = mixers[i];
     if (mixer) mixer.update(dt);
@@ -646,8 +926,10 @@ export function updateBoids(dt) {
 
   // 3) 보이드-보이드 하드 충돌 (가벼운 버전, 지형 샘플링 없음)
   for (let i = 0; i < count; i++) {
+    if (boidStates[i] === "dead") continue;
     const pi = boidPositions[i];
     for (let j = i + 1; j < count; j++) {
+      if (boidStates[j] === "dead") continue;
       const pj = boidPositions[j];
 
       const dx = pj.x - pi.x;

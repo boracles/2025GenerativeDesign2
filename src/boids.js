@@ -630,6 +630,9 @@ const _tmpDir = new THREE.Vector3();
 const _tmpLeftDir = new THREE.Vector3();
 const _tmpRightDir = new THREE.Vector3();
 
+// ───────────────────────────────
+// Sensing force 함수 만들기
+// ───────────────────────────────
 function applyTrailSensingForce(agentIndex, accOut) {
   const pos = boidPositions[agentIndex];
   const vel = boidVelocities[agentIndex];

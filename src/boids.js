@@ -598,6 +598,33 @@ export function markNewborn(indices, newbornDuration = NEWBORN_ANIM_DURATION) {
   }
 }
 
+function worldToTrailIndex(x, z) {
+  // 월드(-BOUND_RADIUS ~ +BOUND_RADIUS)를 0~1로 매핑
+  const u = (x + BOUND_RADIUS) / (BOUND_RADIUS * 2);
+  const v = (z + BOUND_RADIUS) / (BOUND_RADIUS * 2);
+
+  const ix = Math.floor(THREE.MathUtils.clamp(u, 0, 0.999) * TRAIL_GRID_SIZE);
+  const iz = Math.floor(THREE.MathUtils.clamp(v, 0, 0.999) * TRAIL_GRID_SIZE);
+
+  return ix + iz * TRAIL_GRID_SIZE;
+}
+
+function sampleTrail(x, z) {
+  const idx = worldToTrailIndex(x, z);
+  return trailGrid[idx];
+}
+
+function depositTrail(x, z, amount = TRAIL_DEPOSIT_AMOUNT) {
+  const idx = worldToTrailIndex(x, z);
+  trailGrid[idx] += amount;
+}
+
+function decayTrail() {
+  for (let i = 0; i < trailGrid.length; i++) {
+    trailGrid[i] *= TRAIL_DECAY_RATE;
+  }
+}
+
 // ───────────────────────────────
 // 매 프레임 업데이트
 // ───────────────────────────────

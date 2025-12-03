@@ -711,6 +711,9 @@ export function updateBoids(dt) {
 
   _timeAccum += dt;
 
+  // 🔵 매 프레임마다 trail 전체를 조금씩 줄이기 (Decay)
+  decayTrail();
+
   // 상태별 타이머/애니메이션 업데이트
   for (let i = 0; i < count; i++) {
     const state = boidStates[i];

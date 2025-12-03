@@ -958,6 +958,9 @@ export function updateBoids(dt) {
     p.x = newX;
     p.z = newZ;
 
+    //지나간 자리에 trail 남기기
+    depositTrail(p.x, p.z);
+
     // 수면 높이
     let waterY =
       _sampleWaterHeight && _sampleWaterHeight(p.x, p.z) !== undefined

@@ -32,6 +32,11 @@ const W_TRAIL_FOLLOW = 1.5; // 다른 힘과 섞을 가중치
 
 let trailGrid = new Float32Array(TRAIL_GRID_SIZE * TRAIL_GRID_SIZE);
 
+// 🔵 trail 시각화를 위한 데이터텍스처 관련 전역 변수
+let _trailData = null;
+let _trailTexture = null;
+let _trailMesh = null;
+
 // waterPlane.position.y와 맞춰야 함
 const WATER_BASE_LEVEL = -0.5;
 
@@ -535,7 +540,41 @@ export function initBoids({
           applyGenomeToBoid(i, initialGenomes[i]);
         }
       }
+      // 🔵 trail 시각화용 plane 생성 (한 번만)
+      if (!_trailTexture) {
+        const size = TRAIL_GRID_SIZE;
 
+        // RGBA 데이터 배열 생성
+        _trailData = new Uint8Array(size * size * 4);
+        _trailTexture = new THREE.DataTexture(
+          _trailData,
+          size,
+          size,
+          THREE.RGBAFormat
+        );
+        _trailTexture.needsUpdate = true;
+        _trailTexture.magFilter = THREE.LinearFilter;
+        _trailTexture.minFilter = THREE.LinearFilter;
+
+        const trailMat = new THREE.MeshBasicMaterial({
+          map: _trailTexture,
+          transparent: true,
+          opacity: 0.9,
+          blending: THREE.AdditiveBlending, // 빛처럼 더해지는 효과
+          depthWrite: false,
+        });
+
+        const trailPlane = new THREE.Mesh(
+          new THREE.PlaneGeometry(BOUND_RADIUS * 2, BOUND_RADIUS * 2),
+          trailMat
+        );
+        trailPlane.rotation.x = -Math.PI / 2;
+        // 물보다 아주 살짝 아래/위에 배치 (겹침 방지)
+        trailPlane.position.y = WATER_BASE_LEVEL + 0.02;
+
+        _trailMesh = trailPlane;
+        scene.add(trailPlane);
+      }
       _ready = true;
       console.log("[boids] loaded GLB & spawned", count);
     },
@@ -643,6 +682,60 @@ function decayTrail() {
   }
 }
 
+// 🔵 trailGrid → DataTexture로 복사해서 "빛나는 길" 만들기
+function updateTrailTexture() {
+  if (!_trailTexture || !_trailData) return;
+
+  // 1) trailGrid에서 최대값 찾기 (normalize용)
+  let maxVal = 0;
+  for (let i = 0; i < trailGrid.length; i++) {
+    if (trailGrid[i] > maxVal) maxVal = trailGrid[i];
+  }
+  const safeMax = maxVal > 0 ? maxVal : 1;
+
+  // 2) 각 칸을 0~1 → 0~255로 매핑해서 색/알파 채우기
+  for (let i = 0; i < trailGrid.length; i++) {
+    const v = trailGrid[i] / safeMax; // 0 ~ 1
+    let intensity = v;
+    if (intensity < 0) intensity = 0;
+    if (intensity > 1) intensity = 1;
+
+    const idx = i * 4;
+
+    // 아주 미세한 값은 완전 투명 처리 (배경에 안 보이게)
+    if (intensity < 0.05) {
+      _trailData[idx + 0] = 0;
+      _trailData[idx + 1] = 0;
+      _trailData[idx + 2] = 0;
+      _trailData[idx + 3] = 0; // alpha
+    } else {
+      const c = Math.floor(intensity * 255);
+
+      // 시안/청록 계열로 빛나게
+      _trailData[idx + 0] = 0; // R
+      _trailData[idx + 1] = c; // G
+      _trailData[idx + 2] = 200; // B (약간 고정된 푸른색)
+      _trailData[idx + 3] = c; // A (강할수록 더 불투명)
+    }
+  }
+
+  _trailTexture.needsUpdate = true;
+}
+
+// 🔵 이 위치가 얼마나 "자주 밟힌 길"인지 0~1로 반환
+function getTrailStrengthAt(pos) {
+  const value = sampleTrail(pos.x, pos.z); // 해당 위치의 trail 값
+
+  // 너무 큰 값까지 그대로 쓰지 않고, 적당히 잘라서 0~1로 normalize
+  const MAX_VIS_VALUE = 5.0; // 경험적으로 조정 (3~10 사이에서 나중에 튜닝)
+  let t = value / MAX_VIS_VALUE;
+
+  if (t > 1) t = 1;
+  if (t < 0) t = 0;
+
+  return t; // 0 ~ 1
+}
+
 const _yAxis = new THREE.Vector3(0, 1, 0);
 const _tmpDir = new THREE.Vector3();
 const _tmpLeftDir = new THREE.Vector3();
@@ -713,6 +806,9 @@ export function updateBoids(dt) {
 
   // 🔵 매 프레임마다 trail 전체를 조금씩 줄이기 (Decay)
   decayTrail();
+
+  // 🔵 trailGrid를 텍스처로 반영해서 "빛나는 길" 업데이트
+  updateTrailTexture();
 
   // 상태별 타이머/애니메이션 업데이트
   for (let i = 0; i < count; i++) {

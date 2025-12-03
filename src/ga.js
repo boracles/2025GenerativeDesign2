@@ -70,8 +70,8 @@ const RD_PATTERN_TABLE = [
 ];
 
 // Size (몸집)
-const SIZE_GOOD_MIN = 1.8;
-const SIZE_GOOD_MAX = 2.0;
+const SIZE_GOOD_MIN = 0.7;
+const SIZE_GOOD_MAX = 1.4;
 
 // Movement (속도·모션)
 const MOVE_GOOD_SPEED_MIN = 3.0;
@@ -85,8 +85,8 @@ const VALUE_MIN = 0.1;
 const VALUE_MAX = 1.0;
 const PATTERN_MIN = 0;
 const PATTERN_MAX = 4;
-const SCALE_MIN = 0.9;
-const SCALE_MAX = 1.8;
+const SCALE_MIN = 0.6;
+const SCALE_MAX = 1.6;
 const SPEED_MIN = 1.0;
 const SPEED_MAX = 10.0;
 const SHOWOFF_MIN = 0.0;

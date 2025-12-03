@@ -865,6 +865,8 @@ export function updateBoids(dt) {
         .addScaledVector(flow, W_FLOW);
     }
 
+    applyTrailSensingForce(i, steer);
+
     if (steer.length() > MAX_FORCE) {
       steer.multiplyScalar(MAX_FORCE / steer.length());
     }

@@ -17,6 +17,21 @@ const DAMPING = 1.0;
 const WORLD_RADIUS = 80;
 const BOUND_RADIUS = 90;
 
+// ───────────────────────────────
+// Slime Mold Sensing / Trail
+// ───────────────────────────────
+const SENSOR_DISTANCE = 12; // 아이데이션에 맞게 조정
+const SENSOR_ANGLE = Math.PI / 4; // 45도, 미로면 더 좁게, 탐험형이면 더 넓게
+
+const TRAIL_GRID_SIZE = 128; // trail 해상도 (128x128)
+const TRAIL_CELL_SIZE = (BOUND_RADIUS * 2) / TRAIL_GRID_SIZE;
+
+const TRAIL_DEPOSIT_AMOUNT = 1.0;
+const TRAIL_DECAY_RATE = 0.96; // 1에 가깝게 → 천천히 사라짐
+const W_TRAIL_FOLLOW = 1.5; // 다른 힘과 섞을 가중치
+
+let trailGrid = new Float32Array(TRAIL_GRID_SIZE * TRAIL_GRID_SIZE);
+
 // waterPlane.position.y와 맞춰야 함
 const WATER_BASE_LEVEL = -0.5;
 

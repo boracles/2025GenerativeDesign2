@@ -52,6 +52,7 @@ const PLANT_ATTR_RADIUS = 40.0;
 // 꽃가루 끌림
 const W_POLLEN = 9.0;
 const POLLEN_ATTR_RADIUS = 36;
+const W_NUTRIENT = 4.0; // 영양원(꽃가루) 쪽으로 끌리는 힘 가중치
 
 // 보이드 크기 / 최소 간격
 const BOID_SCALE = 3.0;
@@ -339,6 +340,23 @@ function getPollenAttraction(pos) {
   const t = 1.0 - Math.min(dist / POLLEN_ATTR_RADIUS, 1.0);
   out.multiplyScalar(t * t);
   return out;
+}
+
+// ───────────────────────────────
+// 영양원(force): 이 프로젝트에서는 "꽃가루"가 영양원
+// ───────────────────────────────
+function getNutrientForce(pos) {
+  // getPollenAttraction은 재사용용 임시 벡터(_pollenForceTemp)를 반환하므로
+  // clone()으로 복사해서 쓴다.
+  const dir = getPollenAttraction(pos).clone();
+
+  // 길이가 거의 0이면 이번 프레임에는 영양원 영향 없음
+  if (dir.lengthSq() < 1e-6) {
+    return new THREE.Vector3(0, 0, 0);
+  }
+
+  // 방향만 필요하므로 단위벡터로 정규화해서 반환
+  return dir.normalize();
 }
 
 // ───────────────────────────────
@@ -864,7 +882,11 @@ export function updateBoids(dt) {
         .addScaledVector(plantAvoid, 3.0)
         .addScaledVector(flow, W_FLOW);
     }
+    // 영양원(꽃가루) 쪽으로 가는 force
+    const nutrientForce = getNutrientForce(posI);
+    steer.addScaledVector(nutrientForce, W_NUTRIENT);
 
+    // trail Sensing force
     applyTrailSensingForce(i, steer);
 
     if (steer.length() > MAX_FORCE) {

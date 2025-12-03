@@ -625,6 +625,60 @@ function decayTrail() {
   }
 }
 
+const _yAxis = new THREE.Vector3(0, 1, 0);
+const _tmpDir = new THREE.Vector3();
+const _tmpLeftDir = new THREE.Vector3();
+const _tmpRightDir = new THREE.Vector3();
+
+function applyTrailSensingForce(agentIndex, accOut) {
+  const pos = boidPositions[agentIndex];
+  const vel = boidVelocities[agentIndex];
+
+  // 속도가 거의 없으면 방향 판단 불가능 → skip
+  if (vel.lengthSq() < 1e-6) return;
+
+  // 1) 현재 진행 방향 단위벡터
+  _tmpDir.copy(vel).normalize();
+
+  // 2) 좌/우 센서 방향 (현재 방향 기준 회전)
+  _tmpLeftDir.copy(_tmpDir).applyAxisAngle(_yAxis, +SENSOR_ANGLE);
+  _tmpRightDir.copy(_tmpDir).applyAxisAngle(_yAxis, -SENSOR_ANGLE);
+
+  // 3) 센서 위치 (샘플링 지점)
+  const fx = pos.x + _tmpDir.x * SENSOR_DISTANCE;
+  const fz = pos.z + _tmpDir.z * SENSOR_DISTANCE;
+
+  const lx = pos.x + _tmpLeftDir.x * SENSOR_DISTANCE;
+  const lz = pos.z + _tmpLeftDir.z * SENSOR_DISTANCE;
+
+  const rx = pos.x + _tmpRightDir.x * SENSOR_DISTANCE;
+  const rz = pos.z + _tmpRightDir.z * SENSOR_DISTANCE;
+
+  // 4) trail 값 샘플링
+  const valF = sampleTrail(fx, fz);
+  const valL = sampleTrail(lx, lz);
+  const valR = sampleTrail(rx, rz);
+
+  // 5) 가장 강한 값의 방향 선택
+  let bestDir = _tmpDir;
+  let bestVal = valF;
+
+  if (valL > bestVal) {
+    bestVal = valL;
+    bestDir = _tmpLeftDir;
+  }
+  if (valR > bestVal) {
+    bestVal = valR;
+    bestDir = _tmpRightDir;
+  }
+
+  // 거의 신호가 없으면 steer 필요 없음
+  if (bestVal <= 0.001) return;
+
+  // 6) 그 방향으로 힘을 추가
+  accOut.addScaledVector(bestDir, W_TRAIL_FOLLOW * bestVal);
+}
+
 // ───────────────────────────────
 // 매 프레임 업데이트
 // ───────────────────────────────

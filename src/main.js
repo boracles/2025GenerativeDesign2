@@ -2,7 +2,7 @@
 import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import { RoomEnvironment } from "three/addons/environments/RoomEnvironment.js";
-
+import GUI from "lil-gui";
 // 프로젝트 모듈
 import { terrainRoot, tickUniforms } from "./terrain.js";
 import { characterRoot } from "./character.js";
@@ -23,6 +23,7 @@ import {
   applyPopulationGenomes,
   markSelection,
   markNewborn,
+  slimeParams, // 🔹 이거 추가
 } from "./boids.js";
 
 import {
@@ -31,6 +32,7 @@ import {
   NEWBORN_ANIM_DURATION,
 } from "./ga.js";
 
+const gui = new GUI();
 /* =============== 기본 장면 =============== */
 const scene = new THREE.Scene();
 
@@ -429,6 +431,31 @@ initBoids({
   clipName: "FeedingTentacle_WaveTest",
   initialGenomes: initialPopulation,
 });
+setupSlimeGUI();
+
+function setupSlimeGUI() {
+  const folder = gui.addFolder("Slime Mold");
+
+  folder
+    .add(slimeParams, "TRAIL_DEPOSIT_AMOUNT", 0.1, 3.0, 0.05)
+    .name("Deposit");
+
+  folder
+    .add(slimeParams, "TRAIL_DECAY_RATE", 0.9, 0.995, 0.001)
+    .name("Decay Rate");
+
+  folder
+    .add(slimeParams, "W_TRAIL_FOLLOW", 0.0, 10.0, 0.1)
+    .name("Trail Follow");
+
+  folder.add(slimeParams, "SENSOR_DISTANCE", 2, 40, 1).name("Sensor Dist");
+
+  folder
+    .add(slimeParams, "SENSOR_ANGLE_DEG", 15, 90, 1)
+    .name("Sensor Angle (deg)");
+
+  folder.open();
+}
 
 // ★ 먼저 세대 관련 상태 변수를 선언하고
 let currentGeneration = 0;
@@ -569,25 +596,6 @@ function triggerNextGeneration() {
       updateGenerationHUD();
     }, SURVIVORS_WINDOW * 1000);
   }, DEATH_ANIM_DURATION * 1000);
-}
-
-// lil-gui (UMD) 전제: index.html에서 <script src="...lil-gui.umd.min.js"></script>
-if (window.lil && window.lil.GUI) {
-  const gui = new window.lil.GUI();
-  const f = gui.addFolder("Genetic Algorithm");
-
-  f.add(guiState, "autoRun").name("Auto Run");
-  f.add(guiState, "generationDuration", 1, 60, 1).name("Generation (sec)");
-  f.add({ next: () => triggerNextGeneration() }, "next").name(
-    "Next Generation"
-  );
-  f.add(guiState, "generationLabel").name("Generation").listen();
-
-  f.open();
-} else {
-  console.warn(
-    "[main] lil-gui not found. GA GUI disabled. (index.html에 UMD 스크립트 추가 필요)"
-  );
 }
 
 /* =============== 리사이즈 =============== */

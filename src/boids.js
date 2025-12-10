@@ -20,19 +20,25 @@ const BOUND_RADIUS = 90;
 // ───────────────────────────────
 // Slime Mold Sensing / Trail
 // ───────────────────────────────
-const SENSOR_DISTANCE = 12; // 아이데이션에 맞게 조정
-const SENSOR_ANGLE = Math.PI / 4; // 45도, 미로면 더 좁게, 탐험형이면 더 넓게
+// ───────────────────────────────
+// Slime Mold Sensing / Trail
+// ───────────────────────────────
 
+// 💧 슬라임몰드 관련 조절 가능한 파라미터 (HUD에서 조정)
+export const slimeParams = {
+  SENSOR_DISTANCE: 12, // 센서 거리
+  SENSOR_ANGLE_DEG: 45, // 센서 각도 (도 단위, GUI에서 15~90도로 조정)
+  TRAIL_DEPOSIT_AMOUNT: 1.0, // 한 번 지나갈 때 남기는 trail 양
+  TRAIL_DECAY_RATE: 0.96, // 1에 가까울수록 천천히 사라짐
+  W_TRAIL_FOLLOW: 1.5, // trail 따라가는 힘 가중치
+};
+
+// 나머지 그리드 관련 상수는 그대로 사용
 const TRAIL_GRID_SIZE = 128; // trail 해상도 (128x128)
 const TRAIL_CELL_SIZE = (BOUND_RADIUS * 2) / TRAIL_GRID_SIZE;
 
-const TRAIL_DEPOSIT_AMOUNT = 1.0;
-const TRAIL_DECAY_RATE = 0.96; // 1에 가깝게 → 천천히 사라짐
-const W_TRAIL_FOLLOW = 1.5; // 다른 힘과 섞을 가중치
-
 let trailGrid = new Float32Array(TRAIL_GRID_SIZE * TRAIL_GRID_SIZE);
 
-// 🔵 trail 시각화를 위한 데이터텍스처 관련 전역 변수
 let _trailData = null;
 let _trailTexture = null;
 let _trailMesh = null;
@@ -671,14 +677,15 @@ function sampleTrail(x, z) {
   return trailGrid[idx];
 }
 
-function depositTrail(x, z, amount = TRAIL_DEPOSIT_AMOUNT) {
+function depositTrail(x, z, amount = slimeParams.TRAIL_DEPOSIT_AMOUNT) {
   const idx = worldToTrailIndex(x, z);
   trailGrid[idx] += amount;
 }
 
 function decayTrail() {
+  const rate = slimeParams.TRAIL_DECAY_RATE;
   for (let i = 0; i < trailGrid.length; i++) {
-    trailGrid[i] *= TRAIL_DECAY_RATE;
+    trailGrid[i] *= rate;
   }
 }
 
@@ -748,32 +755,33 @@ function applyTrailSensingForce(agentIndex, accOut) {
   const pos = boidPositions[agentIndex];
   const vel = boidVelocities[agentIndex];
 
-  // 속도가 거의 없으면 방향 판단 불가능 → skip
   if (vel.lengthSq() < 1e-6) return;
+
+  // 💧 HUD에서 조절 가능한 값 가져오기
+  const sensorDist = slimeParams.SENSOR_DISTANCE;
+  const sensorAngleRad = (slimeParams.SENSOR_ANGLE_DEG * Math.PI) / 180.0; // 도 → 라디안 변환
 
   // 1) 현재 진행 방향 단위벡터
   _tmpDir.copy(vel).normalize();
 
   // 2) 좌/우 센서 방향 (현재 방향 기준 회전)
-  _tmpLeftDir.copy(_tmpDir).applyAxisAngle(_yAxis, +SENSOR_ANGLE);
-  _tmpRightDir.copy(_tmpDir).applyAxisAngle(_yAxis, -SENSOR_ANGLE);
+  _tmpLeftDir.copy(_tmpDir).applyAxisAngle(_yAxis, +sensorAngleRad);
+  _tmpRightDir.copy(_tmpDir).applyAxisAngle(_yAxis, -sensorAngleRad);
 
   // 3) 센서 위치 (샘플링 지점)
-  const fx = pos.x + _tmpDir.x * SENSOR_DISTANCE;
-  const fz = pos.z + _tmpDir.z * SENSOR_DISTANCE;
+  const fx = pos.x + _tmpDir.x * sensorDist;
+  const fz = pos.z + _tmpDir.z * sensorDist;
 
-  const lx = pos.x + _tmpLeftDir.x * SENSOR_DISTANCE;
-  const lz = pos.z + _tmpLeftDir.z * SENSOR_DISTANCE;
+  const lx = pos.x + _tmpLeftDir.x * sensorDist;
+  const lz = pos.z + _tmpLeftDir.z * sensorDist;
 
-  const rx = pos.x + _tmpRightDir.x * SENSOR_DISTANCE;
-  const rz = pos.z + _tmpRightDir.z * SENSOR_DISTANCE;
+  const rx = pos.x + _tmpRightDir.x * sensorDist;
+  const rz = pos.z + _tmpRightDir.z * sensorDist;
 
-  // 4) trail 값 샘플링
   const valF = sampleTrail(fx, fz);
   const valL = sampleTrail(lx, lz);
   const valR = sampleTrail(rx, rz);
 
-  // 5) 가장 강한 값의 방향 선택
   let bestDir = _tmpDir;
   let bestVal = valF;
 
@@ -786,11 +794,10 @@ function applyTrailSensingForce(agentIndex, accOut) {
     bestDir = _tmpRightDir;
   }
 
-  // 거의 신호가 없으면 steer 필요 없음
   if (bestVal <= 0.001) return;
 
-  // 6) 그 방향으로 힘을 추가
-  accOut.addScaledVector(bestDir, W_TRAIL_FOLLOW * bestVal);
+  // 💧 trail 따라가는 힘 가중치도 slimeParams에서 읽기
+  accOut.addScaledVector(bestDir, slimeParams.W_TRAIL_FOLLOW * bestVal);
 }
 
 // ───────────────────────────────

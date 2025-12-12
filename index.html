@@ -1,35 +1,39 @@
 <!DOCTYPE html>
 <html lang="ko">
-  <head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>My Three.js Project</title>
-    <link rel="icon" href="data:," />
-    <style>
-      :root {
-        color-scheme: dark;
-      }
-      html,
-      body {
-        height: 100%;
-      }
-      body {
-        margin: 0;
-        background: #0f2c39;
-        color: #e6e8ef;
-        overflow: hidden;
-        font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto,
-          Helvetica, Arial;
-      }
-      #hud {
-        position: fixed;
-        left: 12px;
-        top: 10px;
-        font-size: 12px;
-        opacity: 0.85;
-      }
-    </style>
-    <script type="importmap">
+
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>My Three.js Project</title>
+  <link rel="icon" href="data:," />
+  <style>
+    :root {
+      color-scheme: dark;
+    }
+
+    html,
+    body {
+      height: 100%;
+    }
+
+    body {
+      margin: 0;
+      background: #0f2c39;
+      color: #e6e8ef;
+      overflow: hidden;
+      font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto,
+        Helvetica, Arial;
+    }
+
+    #hud {
+      position: fixed;
+      left: 12px;
+      top: 10px;
+      font-size: 12px;
+      opacity: 0.85;
+    }
+  </style>
+  <script type="importmap">
       {
         "imports": {
           "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
@@ -38,11 +42,16 @@
         }
       }
     </script>
-  </head>
-  <body>
-    <div id="hud"></div>
+</head>
 
-    <!-- 여기서 Week2.js 로드 -->
-    <script type="module" src="./src/main.js"></script>
-  </body>
+<body>
+  <div id="hud"></div>
+
+  <!-- Tone.js CDN -->
+  <script src="https://unpkg.com/tone@14.8.49/build/Tone.js"></script>
+
+  <!-- Three.js 쪽 메인 스크립트 -->
+  <script type="module" src="./src/main.js"></script>
+</body>
+
 </html>

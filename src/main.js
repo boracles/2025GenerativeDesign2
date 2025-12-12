@@ -32,6 +32,13 @@ import {
   NEWBORN_ANIM_DURATION,
 } from "./ga.js";
 
+// 전역 Tone.js 객체를 모듈 내부로 끌어오기
+const Tone = window.Tone;
+
+if (!Tone) {
+  console.error("[audio] Tone.js가 로드되지 않았습니다. index.html 스크립트 순서를 확인하세요.");
+}
+
 const gui = new GUI();
 /* =============== 기본 장면 =============== */
 const scene = new THREE.Scene();
@@ -597,6 +604,32 @@ function triggerNextGeneration() {
     }, SURVIVORS_WINDOW * 1000);
   }, DEATH_ANIM_DURATION * 1000);
 }
+
+// ✅ 디버그용: 렌더러 클릭할 때마다 항상 "띵" 소리 나는 버전
+function setupAudioDebugClickSound() {
+  renderer.domElement.addEventListener("pointerdown", async (ev) => {
+    console.log("[audio] pointerdown:", ev.type);
+
+    try {
+      // 오디오 컨텍스트 시작 + 강제 resume
+      await Tone.start();
+      await Tone.getContext().resume();
+      console.log("[audio] AudioContext state =", Tone.getContext().state);
+
+      // 클릭할 때마다 새 Synth 생성 → 항상 안전하게 소리 남
+      const clickSynth = new Tone.Synth().toDestination();
+      console.log("[audio] trigger C4");
+      clickSynth.triggerAttackRelease("C4", "8n");
+    } catch (err) {
+      console.error("[audio] Tone.start() / resume 실패:", err);
+    }
+  });
+}
+
+// 씬 초기화 끝난 뒤 호출
+setupAudioDebugClickSound();
+
+
 
 /* =============== 리사이즈 =============== */
 window.addEventListener("resize", () => {
